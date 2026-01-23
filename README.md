@@ -156,6 +156,212 @@ transport, _ := mongodb.New(db,
 )
 ```
 
+## Integration with distributed package
+
+MongoDB change streams are Broadcast-only (all subscribers receive all changes). The [distributed](https://github.com/rbaliyan/event/tree/main/distributed) package provides `DistributedWorkerMiddleware` that uses atomic database claiming to emulate WorkerPool semantics.
+
+This enables:
+- Load balancing across multiple application instances
+- Automatic failover when workers crash
+- Preventing duplicate processing in distributed deployments
+
+### Setup
+
+```go
+import (
+    "github.com/rbaliyan/event/v3/distributed"
+)
+
+// Create claimer for worker coordination
+// Uses MongoDB's atomic findOneAndUpdate for race-condition-free coordination
+claimer := distributed.NewMongoClaimer(internalDB).
+    WithCollection("_order_worker_claims"). // Custom collection name
+    WithCompletionTTL(24 * time.Hour)       // Remember completed messages for 24h
+
+// Create TTL index for automatic cleanup
+claimer.EnsureIndexes(ctx)
+```
+
+### Subscribe with WorkerPool Emulation
+
+```go
+// Claim TTL should exceed your handler's maximum processing time
+claimTTL := 5 * time.Minute
+
+orderChanges.Subscribe(ctx, func(ctx context.Context, ev event.Event[mongodb.ChangeEvent], change mongodb.ChangeEvent) error {
+    fmt.Printf("Processing: %s %s\n", change.OperationType, change.DocumentKey)
+
+    // Your business logic here
+    // If this returns an error, the claim is released
+    // and another worker can pick it up
+
+    return nil
+}, event.WithMiddleware(
+    distributed.DistributedWorkerMiddleware[mongodb.ChangeEvent](claimer, claimTTL),
+))
+```
+
+### Orphan Recovery
+
+Detect crashed workers and release their claims:
+
+```go
+recoveryRunner := distributed.NewOrphanRecoveryRunner(claimer,
+    distributed.WithStaleTimeout(2*time.Minute),   // Message is orphaned if processing > 2min
+    distributed.WithCheckInterval(30*time.Second), // Check every 30s
+)
+go recoveryRunner.Run(ctx)
+```
+
+## Integration with idempotency package
+
+Even with WorkerPool emulation, messages might be delivered more than once (at-least-once delivery). The [idempotency](https://github.com/rbaliyan/event/tree/main/idempotency) package provides stores to track processed messages and skip duplicates.
+
+### Setup
+
+```go
+import (
+    "github.com/rbaliyan/event/v3/idempotency"
+)
+
+// Create idempotency store
+// For single-instance deployments, use in-memory store
+idempotencyStore := idempotency.NewMemoryStore(7 * 24 * time.Hour) // Remember processed messages for 7 days
+defer idempotencyStore.Close()
+
+// For distributed deployments, use Redis store
+// redisStore := idempotency.NewRedisStore(redisClient, 7 * 24 * time.Hour)
+```
+
+### Use in Handler
+
+```go
+orderChanges.Subscribe(ctx, func(ctx context.Context, ev event.Event[mongodb.ChangeEvent], change mongodb.ChangeEvent) error {
+    // Use the change event ID as the idempotency key
+    messageID := change.ID
+
+    // Atomic check: returns false if new, true if already processed
+    isDuplicate, err := idempotencyStore.IsDuplicate(ctx, messageID)
+    if err != nil {
+        return fmt.Errorf("idempotency check: %w", err)
+    }
+    if isDuplicate {
+        fmt.Printf("Skipping duplicate: %s\n", change.DocumentKey)
+        return nil
+    }
+
+    // Process the change
+    fmt.Printf("Processing: %s %s\n", change.OperationType, change.DocumentKey)
+
+    // Mark as processed after successful processing
+    if err := idempotencyStore.MarkProcessed(ctx, messageID); err != nil {
+        fmt.Printf("Warning: failed to mark processed: %v\n", err)
+    }
+
+    return nil
+})
+```
+
+## Complete At-Least-Once Delivery
+
+Combine all features for production-ready setup:
+
+```go
+import (
+    mongodb "github.com/rbaliyan/event-mongodb"
+    "github.com/rbaliyan/event/v3"
+    "github.com/rbaliyan/event/v3/distributed"
+    "github.com/rbaliyan/event/v3/idempotency"
+)
+
+// 1. Acknowledgment store for at-least-once delivery
+ackStore := mongodb.NewMongoAckStore(
+    internalDB.Collection("_event_acks"),
+    24*time.Hour,
+)
+ackStore.CreateIndexes(ctx)
+
+// 2. Claimer for WorkerPool emulation
+claimer := distributed.NewMongoClaimer(internalDB).
+    WithCollection("_order_worker_claims").
+    WithCompletionTTL(24 * time.Hour)
+claimer.EnsureIndexes(ctx)
+
+// 3. Idempotency store for deduplication
+// Using in-memory store - for distributed deployments, use Redis
+idempotencyStore := idempotency.NewMemoryStore(7 * 24 * time.Hour)
+defer idempotencyStore.Close()
+
+// 4. Transport with all features
+transport, _ := mongodb.New(db,
+    mongodb.WithCollection("orders"),
+    mongodb.WithFullDocument(mongodb.FullDocumentUpdateLookup),
+    mongodb.WithResumeTokenCollection(internalDB, "_resume_tokens"),
+    mongodb.WithResumeTokenID("worker-1"),
+    mongodb.WithAckStore(ackStore),
+)
+
+// 5. Bus and event
+bus, _ := event.NewBus("orders", event.WithTransport(transport))
+defer bus.Close(ctx)
+
+orderChanges := event.New[mongodb.ChangeEvent]("order.changes")
+event.Register(ctx, bus, orderChanges)
+
+// 6. Handler with full middleware stack
+claimTTL := 5 * time.Minute
+
+orderChanges.Subscribe(ctx, func(ctx context.Context, ev event.Event[mongodb.ChangeEvent], change mongodb.ChangeEvent) error {
+    // Idempotency check
+    messageID := change.ID
+    isDuplicate, _ := idempotencyStore.IsDuplicate(ctx, messageID)
+    if isDuplicate {
+        return nil
+    }
+
+    // Process
+    fmt.Printf("Processing: %s %s\n", change.OperationType, change.DocumentKey)
+
+    // Mark processed
+    idempotencyStore.MarkProcessed(ctx, messageID)
+    return nil
+}, event.WithMiddleware(
+    distributed.DistributedWorkerMiddleware[mongodb.ChangeEvent](claimer, claimTTL),
+))
+
+// 7. Orphan recovery
+recoveryRunner := distributed.NewOrphanRecoveryRunner(claimer,
+    distributed.WithStaleTimeout(2*time.Minute),
+    distributed.WithCheckInterval(30*time.Second),
+)
+go recoveryRunner.Run(ctx)
+```
+
+This setup provides:
+- **Resume tokens**: Survive restarts without missing changes
+- **Acknowledgment tracking**: Track pending/completed events
+- **WorkerPool emulation**: Load balance across multiple instances
+- **Idempotency**: Prevent duplicate processing
+- **Orphan recovery**: Handle crashed workers
+
+## Examples
+
+See the [examples](examples/) directory for complete runnable examples:
+
+```bash
+# Basic change stream watching
+EXAMPLE=basic go run ./examples
+
+# WorkerPool emulation with distributed state
+EXAMPLE=workerpool go run ./examples
+
+# Deduplication with idempotency
+EXAMPLE=idempotency go run ./examples
+
+# Full production setup
+EXAMPLE=full go run ./examples
+```
+
 ## Limitations
 
 - `Publish()` is not supported - changes are triggered by database writes
