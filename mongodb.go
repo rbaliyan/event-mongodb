@@ -564,37 +564,16 @@ func New(db *mongo.Database, opts ...Option) (*Transport, error) {
 		opt(t)
 	}
 
-	if err := t.validate(); err != nil {
-		watchCancel()
-		return nil, err
-	}
-
-	// Create internal channel transport for fan-out
-	t.channelTransport = channel.New(
-		channel.WithBufferSize(uint(t.bufferSize)),
-		channel.WithLogger(t.logger),
-	)
-
-	// Determine watch level
+	// Determine watch level based on collection name
 	if t.collectionName != "" {
 		t.watchLevel = WatchLevelCollection
 	} else {
 		t.watchLevel = WatchLevelDatabase
 	}
 
-	// Default resume token ID to hostname
-	if t.resumeTokenID == "" {
-		if hostname, err := os.Hostname(); err == nil {
-			t.resumeTokenID = hostname
-		} else {
-			t.resumeTokenID = "default"
-		}
-	}
-
-	// Auto-create resume token store if not disabled and not provided
-	if !t.disableResume && t.resumeTokenStore == nil {
-		t.resumeTokenStore = NewMongoResumeTokenStore(db.Collection(DefaultResumeTokenCollection))
-		t.logger.Debug("using default resume token collection", "collection", DefaultResumeTokenCollection)
+	if err := t.init(); err != nil {
+		watchCancel()
+		return nil, err
 	}
 
 	return t, nil
@@ -648,9 +627,35 @@ func NewClusterWatch(client *mongo.Client, opts ...Option) (*Transport, error) {
 		opt(t)
 	}
 
-	if err := t.validate(); err != nil {
+	if err := t.init(); err != nil {
 		watchCancel()
 		return nil, err
+	}
+
+	return t, nil
+}
+
+func (t *Transport) validate() error {
+	hasFullDocument := t.fullDocument != "" && t.fullDocument != FullDocumentDefault
+
+	// maxUpdatedFieldsSize requires fullDocument as fallback when updated fields are omitted
+	if t.maxUpdatedFieldsSize > 0 && !hasFullDocument {
+		return ErrMaxUpdatedFieldsSizeRequiresFull
+	}
+
+	// fullDocumentOnly mode requires fullDocument to populate the payload
+	if t.fullDocumentOnly && !hasFullDocument {
+		return ErrFullDocumentRequired
+	}
+
+	return nil
+}
+
+// init performs shared initialization after options are applied.
+// Called by both New() and NewClusterWatch().
+func (t *Transport) init() error {
+	if err := t.validate(); err != nil {
+		return err
 	}
 
 	// Create internal channel transport for fan-out
@@ -670,24 +675,10 @@ func NewClusterWatch(client *mongo.Client, opts ...Option) (*Transport, error) {
 
 	// Auto-create resume token store if not disabled and not provided
 	if !t.disableResume && t.resumeTokenStore == nil {
-		t.resumeTokenStore = NewMongoResumeTokenStore(adminDB.Collection(DefaultResumeTokenCollection))
-		t.logger.Debug("using default resume token collection", "database", "admin", "collection", DefaultResumeTokenCollection)
-	}
-
-	return t, nil
-}
-
-func (t *Transport) validate() error {
-	hasFullDocument := t.fullDocument != "" && t.fullDocument != FullDocumentDefault
-
-	// maxUpdatedFieldsSize requires fullDocument as fallback when updated fields are omitted
-	if t.maxUpdatedFieldsSize > 0 && !hasFullDocument {
-		return ErrMaxUpdatedFieldsSizeRequiresFull
-	}
-
-	// fullDocumentOnly mode requires fullDocument to populate the payload
-	if t.fullDocumentOnly && !hasFullDocument {
-		return ErrFullDocumentRequired
+		t.resumeTokenStore = NewMongoResumeTokenStore(t.db.Collection(DefaultResumeTokenCollection))
+		t.logger.Debug("using default resume token collection",
+			"database", t.db.Name(),
+			"collection", DefaultResumeTokenCollection)
 	}
 
 	return nil
@@ -1164,11 +1155,14 @@ func (t *Transport) processChange(ctx context.Context, cs *mongo.ChangeStream) e
 		},
 	)
 
-	// Store as pending if ack store configured
+	// Store as pending if ack store configured.
+	// Use a detached context so the store succeeds even during shutdown.
 	if t.ackStore != nil {
-		if err := t.ackStore.Store(ctx, changeEvent.ID); err != nil {
+		storeCtx, storeCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if err := t.ackStore.Store(storeCtx, changeEvent.ID); err != nil {
 			t.logger.Warn("failed to store pending event", "event_id", changeEvent.ID, "error", err)
 		}
+		storeCancel()
 	}
 
 	// Publish to all registered events via channel transport
