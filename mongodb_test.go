@@ -802,17 +802,31 @@ func TestChangeEventJSON(t *testing.T) {
 // --- resumeTokenKey() tests ---
 
 func TestResumeTokenKey(t *testing.T) {
-	// Only test cluster level since collection/database levels require a real *mongo.Database
-	// which cannot be constructed without a live connection.
-	tr := &Transport{
-		watchLevel:    WatchLevelCluster,
-		resumeTokenID: "host1",
-	}
-	got := tr.resumeTokenKey()
-	want := "*.*:host1"
-	if got != want {
-		t.Errorf("resumeTokenKey() = %q, want %q", got, want)
-	}
+	// Collection/database levels require a real *mongo.Database which cannot
+	// be constructed without a live connection, so we test cluster and default.
+	t.Run("cluster level", func(t *testing.T) {
+		tr := &Transport{
+			watchLevel:    WatchLevelCluster,
+			resumeTokenID: "host1",
+		}
+		got := tr.resumeTokenKey()
+		want := "*.*:host1"
+		if got != want {
+			t.Errorf("resumeTokenKey() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("unknown watch level uses default namespace", func(t *testing.T) {
+		tr := &Transport{
+			watchLevel:    WatchLevel(99),
+			resumeTokenID: "host1",
+		}
+		got := tr.resumeTokenKey()
+		want := "default:host1"
+		if got != want {
+			t.Errorf("resumeTokenKey() = %q, want %q", got, want)
+		}
+	})
 }
 
 // --- Status constants tests ---
@@ -1371,28 +1385,3 @@ func TestDefaultResumeTokenCollection(t *testing.T) {
 	}
 }
 
-// --- resumeTokenKey() additional tests ---
-
-func TestResumeTokenKey_AllLevels(t *testing.T) {
-	t.Run("cluster level", func(t *testing.T) {
-		tr := &Transport{
-			watchLevel:    WatchLevelCluster,
-			resumeTokenID: "host1",
-		}
-		got := tr.resumeTokenKey()
-		if got != "*.*:host1" {
-			t.Errorf("got %q, want *.*:host1", got)
-		}
-	})
-
-	t.Run("default watch level", func(t *testing.T) {
-		tr := &Transport{
-			watchLevel:    WatchLevel(99),
-			resumeTokenID: "test",
-		}
-		got := tr.resumeTokenKey()
-		if got != "default:test" {
-			t.Errorf("got %q, want default:test", got)
-		}
-	})
-}

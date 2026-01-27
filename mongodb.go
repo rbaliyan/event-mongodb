@@ -971,7 +971,7 @@ func (t *Transport) watchOnce(ctx context.Context) error {
 		// We need to call TryNext to get a resume token without blocking
 		if cs.TryNext(ctx) {
 			// Got an event - save token and process it
-			if err := t.resumeTokenStore.Save(ctx, resumeKey, cs.ResumeToken()); err != nil {
+			if err := t.saveResumeToken(resumeKey, cs.ResumeToken()); err != nil {
 				t.logger.Warn("failed to save initial resume token", "error", err)
 			} else {
 				t.logger.Info("saved initial resume token, starting from current position", "key", resumeKey)
@@ -982,7 +982,7 @@ func (t *Transport) watchOnce(ctx context.Context) error {
 			}
 		} else if cs.ResumeToken() != nil {
 			// No event yet, but we have a resume token from the cursor
-			if err := t.resumeTokenStore.Save(ctx, resumeKey, cs.ResumeToken()); err != nil {
+			if err := t.saveResumeToken(resumeKey, cs.ResumeToken()); err != nil {
 				t.logger.Warn("failed to save initial resume token", "error", err)
 			} else {
 				t.logger.Info("saved initial resume token, starting from current position", "key", resumeKey)
@@ -999,13 +999,21 @@ func (t *Transport) watchOnce(ctx context.Context) error {
 
 		// Persist resume token
 		if t.resumeTokenStore != nil {
-			if err := t.resumeTokenStore.Save(ctx, resumeKey, cs.ResumeToken()); err != nil {
+			if err := t.saveResumeToken(resumeKey, cs.ResumeToken()); err != nil {
 				t.logger.Warn("failed to save resume token", "error", err)
 			}
 		}
 	}
 
 	return cs.Err()
+}
+
+// saveResumeToken persists a resume token using a detached context so the
+// save succeeds even when the watcher context is being cancelled during shutdown.
+func (t *Transport) saveResumeToken(resumeKey string, token bson.Raw) error {
+	saveCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return t.resumeTokenStore.Save(saveCtx, resumeKey, token)
 }
 
 // resumeTokenKey returns the key used for storing resume tokens.
