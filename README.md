@@ -16,6 +16,8 @@ go get github.com/rbaliyan/event-mongodb
 - Automatic reconnection with exponential backoff
 - Full document lookup for update events
 - Flexible payload options (full ChangeEvent or document only)
+- Update description metadata (updated/removed fields) via context
+- Empty update filtering and updated fields size limits
 
 ## Usage
 
@@ -136,6 +138,39 @@ transport, _ := mongodb.New(db,
     mongodb.WithCollection("orders"),
     mongodb.WithAckStore(ackStore),
 )
+```
+
+### Update Description Metadata
+
+Include field-level change details in event context metadata:
+
+```go
+transport, _ := mongodb.New(db,
+    mongodb.WithCollection("orders"),
+    mongodb.WithFullDocument(mongodb.FullDocumentUpdateLookup),
+    mongodb.WithUpdateDescription(), // Include updated/removed fields in metadata
+)
+
+// In your subscriber handler:
+orderEvent.Subscribe(ctx, func(ctx context.Context, e event.Event[Order], order Order) error {
+    desc := mongodb.ContextUpdateDescription(ctx)
+    if desc != nil {
+        fmt.Printf("Updated fields: %v\n", desc.UpdatedFields)
+        fmt.Printf("Removed fields: %v\n", desc.RemovedFields)
+    }
+    return nil
+})
+```
+
+Control update behavior:
+
+```go
+// Include empty updates (no-op updates that MongoDB produces internally)
+mongodb.WithEmptyUpdates()
+
+// Limit updated_fields metadata size (falls back to full document)
+// Requires WithFullDocument to be set
+mongodb.WithMaxUpdatedFieldsSize(4096) // 4KB limit; implicitly enables WithUpdateDescription()
 ```
 
 ### Pipeline Filtering
