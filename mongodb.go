@@ -860,6 +860,9 @@ func (t *Transport) watchLoop(ctx context.Context) {
 				return
 			}
 
+			// Notify error handler
+			t.onError(err)
+
 			backoffDuration := backoff.Next()
 			t.logger.Error("change stream error, reconnecting",
 				"error", err, "backoff", backoffDuration)
@@ -994,10 +997,12 @@ func (t *Transport) watchOnce(ctx context.Context) error {
 	for cs.Next(ctx) {
 		if err := t.processChange(ctx, cs); err != nil {
 			t.logger.Error("failed to process change", "error", err)
-			// Continue processing other changes
+			t.onError(err)
+			// Skip resume token save on failure to allow reprocessing
+			continue
 		}
 
-		// Persist resume token
+		// Persist resume token only after successful processing
 		if t.resumeTokenStore != nil {
 			if err := t.saveResumeToken(resumeKey, cs.ResumeToken()); err != nil {
 				t.logger.Warn("failed to save resume token", "error", err)
@@ -1173,11 +1178,16 @@ func (t *Transport) processChange(ctx context.Context, cs *mongo.ChangeStream) e
 		storeCancel()
 	}
 
-	// Publish to all registered events via channel transport
+	// Publish to all registered events via channel transport.
+	// Use a detached context so publish succeeds even if the watcher context
+	// is being cancelled during shutdown.
+	publishCtx, publishCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer publishCancel()
+
 	// Each registered event's subscribers receive the change
 	t.registeredEvents.Range(func(key, value any) bool {
 		eventName := key.(string)
-		if err := t.channelTransport.Publish(ctx, eventName, msg); err != nil {
+		if err := t.channelTransport.Publish(publishCtx, eventName, msg); err != nil {
 			t.logger.Warn("failed to publish to channel transport", "event", eventName, "error", err)
 		}
 		return true
