@@ -147,7 +147,7 @@ func (s *MongoAckStore) CreateIndexes(ctx context.Context) error {
 		{
 			Keys: bson.D{{Key: "acked_at", Value: 1}},
 			Options: options.Index().SetExpireAfterSeconds(int32(s.ttl.Seconds())).
-				SetPartialFilterExpression(bson.M{"acked_at": bson.M{"$ne": nil}}),
+				SetPartialFilterExpression(bson.M{"acked_at": bson.M{"$gt": time.Time{}}}),
 		},
 	}
 

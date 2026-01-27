@@ -73,11 +73,34 @@ import (
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
-// Errors
+// Errors returned by the MongoDB transport.
 var (
-	ErrClientRequired      = errors.New("mongodb client is required")
-	ErrDatabaseRequired    = errors.New("mongodb database is required")
+	// ErrClientRequired is returned by NewClusterWatch when client is nil.
+	ErrClientRequired = errors.New("mongodb client is required")
+
+	// ErrDatabaseRequired is returned by New when database is nil.
+	ErrDatabaseRequired = errors.New("mongodb database is required")
+
+	// ErrPublishNotSupported is returned by Publish on every call. The MongoDB
+	// change stream transport is subscribe-only: events are produced by writing
+	// to the database, not by calling Publish. Code that uses the generic
+	// transport.Transport interface should check for this error with
+	// errors.Is(err, mongodb.ErrPublishNotSupported) and handle it accordingly.
 	ErrPublishNotSupported = errors.New("mongodb transport does not support Publish; changes are triggered by database writes")
+
+	// ErrMaxUpdatedFieldsSizeRequiresFull is returned by New when
+	// WithMaxUpdatedFieldsSize is used without WithFullDocument.
+	ErrMaxUpdatedFieldsSizeRequiresFull = errors.New("WithMaxUpdatedFieldsSize requires WithFullDocument to fall back to full document when updated fields exceed the limit")
+
+	// ErrFullDocumentRequired is returned by New when WithFullDocumentOnly
+	// is used without WithFullDocument.
+	ErrFullDocumentRequired = errors.New("WithFullDocumentOnly requires WithFullDocument to populate the payload")
+)
+
+// Transport status constants
+const (
+	statusClosed int32 = 0
+	statusOpen   int32 = 1
 )
 
 // WatchLevel indicates what level of MongoDB hierarchy to watch.
@@ -217,20 +240,28 @@ type Transport struct {
 	maxAwaitTime *time.Duration
 
 	// Watcher state
+	watcherOnce   sync.Once
+	watcherCtx    context.Context
 	watcherCancel context.CancelFunc
 	watcherWg     sync.WaitGroup
 
 	// Payload options
-	fullDocumentOnly bool // If true, send only fullDocument as payload instead of ChangeEvent
+	fullDocumentOnly         bool // If true, send only fullDocument as payload instead of ChangeEvent
+	includeUpdateDescription bool // If true, include UpdateDescription fields in metadata
+	emptyUpdates       bool // If true, deliver update events with no field changes (default: discard)
+	maxUpdatedFieldsSize int // Max size in bytes for updated_fields metadata (0 = unlimited)
 }
 
 // Option configures the MongoDB transport
 type Option func(*Transport)
 
 // WithCollection sets the collection to watch for changes.
+// An empty name is ignored (database-level watch is used instead).
 func WithCollection(name string) Option {
 	return func(t *Transport) {
-		t.collectionName = name
+		if name != "" {
+			t.collectionName = name
+		}
 	}
 }
 
@@ -431,6 +462,60 @@ func WithFullDocumentOnly() Option {
 	}
 }
 
+// WithUpdateDescription includes UpdateDescription (updated and removed fields)
+// from change stream events in the message metadata. This is useful for audit
+// trails or tracking which fields changed in update operations.
+//
+// When enabled, two metadata keys are added for update/replace operations:
+//   - "updated_fields": JSON-encoded map of fields that were updated
+//   - "removed_fields": JSON-encoded array of fields that were removed
+//
+// These keys are omitted for non-update operations (insert, delete) or when
+// the change event has no UpdateDescription.
+//
+// Use ContextUpdateDescription(ctx) to extract the UpdateDescription from
+// the handler context.
+func WithUpdateDescription() Option {
+	return func(t *Transport) {
+		t.includeUpdateDescription = true
+	}
+}
+
+// WithEmptyUpdates delivers update events even when UpdateDescription has
+// no field changes (no updated or removed fields). By default, such empty updates
+// are silently discarded since they carry no meaningful change information.
+//
+// MongoDB can produce empty updates in scenarios like:
+//   - $set to the same value (no-op update)
+//   - Internal replication events
+//   - Updates that only affect internal fields
+func WithEmptyUpdates() Option {
+	return func(t *Transport) {
+		t.emptyUpdates = true
+	}
+}
+
+// WithMaxUpdatedFieldsSize sets the maximum size in bytes for the serialized
+// updated_fields metadata value. When the JSON-encoded updated fields exceed
+// this limit, updated_fields is omitted from metadata and the subscriber
+// should rely on the full document instead. The removed_fields metadata is
+// always included regardless of this limit since it only contains field names.
+//
+// This requires WithFullDocument to be set so there is a fallback when the
+// updated fields are too large. Returns an error from New() if fullDocument
+// is not configured.
+//
+// A value of 0 or negative means unlimited (no size limit).
+// This option implicitly enables WithUpdateDescription().
+func WithMaxUpdatedFieldsSize(bytes int) Option {
+	return func(t *Transport) {
+		if bytes > 0 {
+			t.maxUpdatedFieldsSize = bytes
+		}
+		t.includeUpdateDescription = true
+	}
+}
+
 // New creates a new MongoDB change stream transport.
 //
 // Watch levels:
@@ -462,17 +547,26 @@ func New(db *mongo.Database, opts ...Option) (*Transport, error) {
 		return nil, ErrDatabaseRequired
 	}
 
+	watchCtx, watchCancel := context.WithCancel(context.Background())
+
 	t := &Transport{
-		status:     1,
-		db:         db,
-		client:     db.Client(),
-		logger:     transport.Logger("transport>mongodb"),
-		onError:    func(error) {},
-		bufferSize: 100,
+		status:        statusOpen,
+		db:            db,
+		client:        db.Client(),
+		logger:        transport.Logger("transport>mongodb"),
+		onError:       func(error) {},
+		bufferSize:    100,
+		watcherCtx:    watchCtx,
+		watcherCancel: watchCancel,
 	}
 
 	for _, opt := range opts {
 		opt(t)
+	}
+
+	if err := t.validate(); err != nil {
+		watchCancel()
+		return nil, err
 	}
 
 	// Create internal channel transport for fan-out
@@ -536,18 +630,27 @@ func NewClusterWatch(client *mongo.Client, opts ...Option) (*Transport, error) {
 	// Use "admin" database for storing resume tokens
 	adminDB := client.Database("admin")
 
+	watchCtx, watchCancel := context.WithCancel(context.Background())
+
 	t := &Transport{
-		status:     1,
-		client:     client,
-		db:         adminDB,
-		watchLevel: WatchLevelCluster,
-		logger:     transport.Logger("transport>mongodb"),
-		onError:    func(error) {},
-		bufferSize: 100,
+		status:        statusOpen,
+		client:        client,
+		db:            adminDB,
+		watchLevel:    WatchLevelCluster,
+		logger:        transport.Logger("transport>mongodb"),
+		onError:       func(error) {},
+		bufferSize:    100,
+		watcherCtx:    watchCtx,
+		watcherCancel: watchCancel,
 	}
 
 	for _, opt := range opts {
 		opt(t)
+	}
+
+	if err := t.validate(); err != nil {
+		watchCancel()
+		return nil, err
 	}
 
 	// Create internal channel transport for fan-out
@@ -574,8 +677,24 @@ func NewClusterWatch(client *mongo.Client, opts ...Option) (*Transport, error) {
 	return t, nil
 }
 
+func (t *Transport) validate() error {
+	hasFullDocument := t.fullDocument != "" && t.fullDocument != FullDocumentDefault
+
+	// maxUpdatedFieldsSize requires fullDocument as fallback when updated fields are omitted
+	if t.maxUpdatedFieldsSize > 0 && !hasFullDocument {
+		return ErrMaxUpdatedFieldsSizeRequiresFull
+	}
+
+	// fullDocumentOnly mode requires fullDocument to populate the payload
+	if t.fullDocumentOnly && !hasFullDocument {
+		return ErrFullDocumentRequired
+	}
+
+	return nil
+}
+
 func (t *Transport) isOpen() bool {
-	return atomic.LoadInt32(&t.status) == 1
+	return atomic.LoadInt32(&t.status) == statusOpen
 }
 
 // RegisterEvent creates resources for an event and starts watching.
@@ -617,7 +736,23 @@ func (t *Transport) UnregisterEvent(ctx context.Context, name string) error {
 	return nil
 }
 
-// Publish is not supported - changes are triggered by database writes.
+// Publish always returns ErrPublishNotSupported because MongoDB change stream
+// events are triggered by database writes, not by explicit publishing.
+//
+// Unlike traditional transports (Redis, NATS, Kafka) where Publish sends a
+// message to subscribers, the MongoDB transport watches for changes that occur
+// when your application (or any other client) inserts, updates, or deletes
+// documents. There is no need to call Publish -- writing to MongoDB IS the
+// publish action.
+//
+// If you are writing generic transport code that calls Publish, you should
+// check for this error and handle it appropriately:
+//
+//	err := transport.Publish(ctx, name, msg)
+//	if errors.Is(err, mongodb.ErrPublishNotSupported) {
+//	    // MongoDB transport: writes to the database trigger events automatically
+//	    return nil
+//	}
 func (t *Transport) Publish(ctx context.Context, name string, msg transport.Message) error {
 	return ErrPublishNotSupported
 }
@@ -640,14 +775,12 @@ func (t *Transport) Subscribe(ctx context.Context, name string, opts ...transpor
 
 // Close shuts down the transport.
 func (t *Transport) Close(ctx context.Context) error {
-	if !atomic.CompareAndSwapInt32(&t.status, 1, 0) {
+	if !atomic.CompareAndSwapInt32(&t.status, statusOpen, statusClosed) {
 		return nil
 	}
 
 	// Stop the watcher
-	if t.watcherCancel != nil {
-		t.watcherCancel()
-	}
+	t.watcherCancel()
 	t.watcherWg.Wait()
 
 	// Close the channel transport (closes all subscriptions)
@@ -711,19 +844,13 @@ func (t *Transport) Health(ctx context.Context) *transport.HealthCheckResult {
 
 // startWatcher starts the change stream watcher goroutine.
 func (t *Transport) startWatcher() {
-	// Only start once
-	if t.watcherCancel != nil {
-		return
-	}
-
-	watchCtx, cancel := context.WithCancel(context.Background())
-	t.watcherCancel = cancel
-
-	t.watcherWg.Add(1)
-	go func() {
-		defer t.watcherWg.Done()
-		t.watchLoop(watchCtx)
-	}()
+	t.watcherOnce.Do(func() {
+		t.watcherWg.Add(1)
+		go func() {
+			defer t.watcherWg.Done()
+			t.watchLoop(t.watcherCtx)
+		}()
+	})
 }
 
 // watchLoop continuously watches the change stream with reconnection.
@@ -752,9 +879,11 @@ func (t *Transport) watchLoop(ctx context.Context) {
 				t.logger.Warn("resume token is stale (oplog rolled past), clearing and starting fresh")
 				if t.resumeTokenStore != nil {
 					resumeKey := t.resumeTokenKey()
-					if clearErr := t.resumeTokenStore.Save(ctx, resumeKey, nil); clearErr != nil {
+					clearCtx, clearCancel := context.WithTimeout(context.Background(), 10*time.Second)
+					if clearErr := t.resumeTokenStore.Save(clearCtx, resumeKey, nil); clearErr != nil {
 						t.logger.Error("failed to clear stale resume token", "error", clearErr)
 					}
+					clearCancel()
 				}
 			}
 
@@ -822,21 +951,27 @@ func (t *Transport) watchOnce(ctx context.Context) error {
 	switch t.watchLevel {
 	case WatchLevelCollection:
 		cs, err = t.db.Collection(t.collectionName).Watch(ctx, t.pipeline, csOpts)
-		t.logger.Info("change stream opened", "level", "collection",
-			"database", t.db.Name(), "collection", t.collectionName)
+		t.logger.Info("change stream opened",
+			"watch_level", "collection",
+			"database", t.db.Name(),
+			"target_collection", t.collectionName)
 	case WatchLevelDatabase:
 		cs, err = t.db.Watch(ctx, t.pipeline, csOpts)
-		t.logger.Info("change stream opened", "level", "database",
+		t.logger.Info("change stream opened", "watch_level", "database",
 			"database", t.db.Name())
 	case WatchLevelCluster:
 		cs, err = t.client.Watch(ctx, t.pipeline, csOpts)
-		t.logger.Info("change stream opened", "level", "cluster")
+		t.logger.Info("change stream opened", "watch_level", "cluster")
 	}
 
 	if err != nil {
 		return err
 	}
-	defer cs.Close(ctx)
+	defer func() {
+		closeCtx, closeCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer closeCancel()
+		cs.Close(closeCtx)
+	}()
 
 	// If no existing token, save the current position and start from here
 	// This prevents processing historical oplog events on first start
@@ -925,6 +1060,14 @@ func (t *Transport) processChange(ctx context.Context, cs *mongo.ChangeStream) e
 	// Extract change event data
 	changeEvent := t.extractChangeEvent(raw)
 
+	// Discard empty updates unless explicitly included
+	if !t.emptyUpdates && isEmptyUpdate(changeEvent) {
+		t.logger.Debug("skipping empty update event",
+			"operation", changeEvent.OperationType,
+			"document_key", changeEvent.DocumentKey)
+		return nil
+	}
+
 	// Determine payload and content type based on mode
 	var payload []byte
 	var err error
@@ -968,24 +1111,54 @@ func (t *Transport) processChange(ctx context.Context, cs *mongo.ChangeStream) e
 		}
 	}
 
+	// Build metadata
+	metadata := map[string]string{
+		MetadataContentType: contentType,
+		MetadataOperation:   string(changeEvent.OperationType),
+		MetadataDatabase:    changeEvent.Database,
+		MetadataCollection:  changeEvent.Collection,
+		MetadataNamespace:   changeEvent.Namespace,
+		MetadataDocumentKey: changeEvent.DocumentKey,
+		MetadataClusterTime: changeEvent.Timestamp.Format(time.RFC3339Nano),
+	}
+
+	// Include update description fields when enabled
+	if t.includeUpdateDescription && changeEvent.UpdateDesc != nil {
+		// RemovedFields only contains field names, always include
+		if changeEvent.UpdateDesc.RemovedFields != nil {
+			if data, err := json.Marshal(changeEvent.UpdateDesc.RemovedFields); err == nil {
+				metadata[MetadataRemovedFields] = string(data)
+			}
+		}
+
+		// UpdatedFields contains values and can be large; apply size limit
+		if changeEvent.UpdateDesc.UpdatedFields != nil {
+			if data, err := json.Marshal(changeEvent.UpdateDesc.UpdatedFields); err == nil {
+				if t.maxUpdatedFieldsSize <= 0 || len(data) <= t.maxUpdatedFieldsSize {
+					metadata[MetadataUpdatedFields] = string(data)
+				} else {
+					t.logger.Debug("updated fields exceeds max size, omitting from metadata",
+						"size", len(data),
+						"max", t.maxUpdatedFieldsSize,
+						"document_key", changeEvent.DocumentKey)
+				}
+			}
+		}
+	}
+
 	// Create message with ack function
 	msg := transport.NewMessageWithAck(
 		changeEvent.ID,
 		"mongodb://"+changeEvent.Database+"/"+changeEvent.Collection,
 		payload,
-		map[string]string{
-			"Content-Type": contentType,
-			"operation":    string(changeEvent.OperationType),
-			"database":     changeEvent.Database,
-			"collection":   changeEvent.Collection,
-			"namespace":    changeEvent.Namespace,
-			"document_key": changeEvent.DocumentKey,
-			"cluster_time": changeEvent.Timestamp.Format(time.RFC3339Nano),
-		},
+		metadata,
 		0,
 		func(err error) error {
 			if err == nil && t.ackStore != nil {
-				return t.ackStore.Ack(ctx, changeEvent.ID)
+				// Use a detached context so ack succeeds even if watcher context is canceled
+				ackCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				return t.ackStore.Ack(ackCtx, changeEvent.ID)
 			}
 			return nil
 		},
@@ -1088,6 +1261,16 @@ func (t *Transport) extractChangeEvent(raw bson.M) ChangeEvent {
 				}
 			}
 		}
+		if truncated, ok := updateDesc["truncatedArrays"].(bson.A); ok {
+			for _, f := range truncated {
+				// Each element is {field: "name", newSize: N}
+				if ta, ok := f.(bson.M); ok {
+					if field, ok := ta["field"].(string); ok {
+						event.UpdateDesc.TruncatedArrays = append(event.UpdateDesc.TruncatedArrays, field)
+					}
+				}
+			}
+		}
 	}
 
 	// Extract timestamp
@@ -1176,6 +1359,20 @@ func bsonMToMap(m bson.M) map[string]any {
 		result[k] = convertBSONTypes(v)
 	}
 	return result
+}
+
+// isEmptyUpdate returns true if the event is an update operation
+// with no updated or removed fields in the UpdateDescription.
+// Replace operations are not considered empty updates since they
+// replace the entire document and don't produce UpdateDescription.
+func isEmptyUpdate(e ChangeEvent) bool {
+	if e.OperationType != OperationUpdate {
+		return false
+	}
+	if e.UpdateDesc == nil {
+		return true
+	}
+	return len(e.UpdateDesc.UpdatedFields) == 0 && len(e.UpdateDesc.RemovedFields) == 0
 }
 
 // Compile-time checks
