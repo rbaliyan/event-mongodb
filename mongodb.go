@@ -980,6 +980,7 @@ func (t *Transport) processChange(ctx context.Context, cs *mongo.ChangeStream) e
 			"collection":   changeEvent.Collection,
 			"namespace":    changeEvent.Namespace,
 			"document_key": changeEvent.DocumentKey,
+			"cluster_time": changeEvent.Timestamp.Format(time.RFC3339Nano),
 		},
 		0,
 		func(err error) error {
