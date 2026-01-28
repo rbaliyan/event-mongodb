@@ -403,7 +403,7 @@ func TestBsonMToMap(t *testing.T) {
 
 func TestExtractChangeEvent(t *testing.T) {
 	tr := &Transport{
-		collectionName: "orders",
+		transportOptions: transportOptions{collectionName: "orders"},
 	}
 	// Give tr a db-like fallback by leaving db nil but setting collectionName
 
@@ -806,8 +806,8 @@ func TestResumeTokenKey(t *testing.T) {
 	// be constructed without a live connection, so we test cluster and default.
 	t.Run("cluster level", func(t *testing.T) {
 		tr := &Transport{
-			level:    watchLevelCluster,
-			resumeTokenID: "host1",
+			transportOptions: transportOptions{resumeTokenID: "host1"},
+			level:            watchLevelCluster,
 		}
 		got := tr.resumeTokenKey()
 		want := "*.*:host1"
@@ -818,8 +818,8 @@ func TestResumeTokenKey(t *testing.T) {
 
 	t.Run("unknown watch level uses default namespace", func(t *testing.T) {
 		tr := &Transport{
-			level:    watchLevel(99),
-			resumeTokenID: "host1",
+			transportOptions: transportOptions{resumeTokenID: "host1"},
+			level:            watchLevel(99),
 		}
 		got := tr.resumeTokenKey()
 		want := "default:host1"
@@ -916,7 +916,7 @@ func TestNewValidationErrors(t *testing.T) {
 	// returns the same errors through option combination tests.
 
 	t.Run("maxUpdatedFieldsSize without fullDocument via options", func(t *testing.T) {
-		tr := &Transport{maxUpdatedFieldsSize: 1024}
+		tr := &Transport{transportOptions: transportOptions{maxUpdatedFieldsSize: 1024}}
 		err := tr.validate()
 		if err != ErrMaxUpdatedFieldsSizeRequiresFull {
 			t.Errorf("validate() = %v, want ErrMaxUpdatedFieldsSizeRequiresFull", err)
@@ -924,7 +924,7 @@ func TestNewValidationErrors(t *testing.T) {
 	})
 
 	t.Run("fullDocumentOnly without fullDocument via options", func(t *testing.T) {
-		tr := &Transport{fullDocumentOnly: true}
+		tr := &Transport{transportOptions: transportOptions{fullDocumentOnly: true}}
 		err := tr.validate()
 		if err != ErrFullDocumentRequired {
 			t.Errorf("validate() = %v, want ErrFullDocumentRequired", err)

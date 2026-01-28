@@ -199,21 +199,44 @@ type ResumeTokenStore interface {
 	Save(ctx context.Context, collection string, token bson.Raw) error
 }
 
-// AckStore tracks which change events have been acknowledged.
-// This enables at-least-once delivery by tracking processed events.
+// AckStore tracks which change events have been acknowledged by subscribers.
 //
-// The transport only requires Store and Ack. Implementations may provide
-// additional query methods (e.g., MongoAckStore.IsPending) for external use.
+// This provides visibility into event processing status — which events are
+// pending vs acknowledged. It does NOT provide crash recovery on its own;
+// crash recovery is handled by resume tokens (see ResumeTokenStore), which
+// ensure the change stream resumes from the correct position after a restart.
+//
+// Typical use cases for AckStore:
+//   - Monitoring: query pending events to detect stuck subscribers
+//   - Auditing: record which events were successfully processed
+//   - Retry logic: external systems can re-process events still marked pending
+//
+// The transport calls Store before publishing and Ack on subscriber
+// acknowledgment. If Store fails, the event is not published (preserving
+// consistency). Implementations may provide additional query methods
+// (e.g., MongoAckStore.IsPending) for external use.
 type AckStore interface {
 	// Store marks an event as pending (not yet acknowledged).
+	// Called before the event is published to subscribers.
 	Store(ctx context.Context, eventID string) error
 
 	// Ack marks an event as acknowledged (successfully processed).
+	// Called when a subscriber acknowledges the message.
 	Ack(ctx context.Context, eventID string) error
 }
 
 // defaultResumeTokenCollection is the default collection name for storing resume tokens.
 const defaultResumeTokenCollection = "_event_resume_tokens"
+
+// resumeTokenSaveInterval is the minimum interval between resume token saves.
+// Tokens are buffered between saves and flushed on stream close to avoid
+// losing progress while reducing write amplification.
+const resumeTokenSaveInterval = 5 * time.Second
+
+// detachedTimeout is the timeout for operations that use a detached context
+// (context.Background) to survive parent cancellation — resume token saves,
+// ack store writes, change stream close, and fan-out publishes.
+const detachedTimeout = 10 * time.Second
 
 // options holds configuration values set via Option functions.
 // This struct is unexported to prevent direct access — only Option functions
@@ -239,73 +262,29 @@ type transportOptions struct {
 
 // Transport implements transport.Transport using MongoDB change streams.
 type Transport struct {
+	transportOptions // Embedded configuration from Option functions
+
 	status           int32
-	client           *mongo.Client   // For cluster-level watch
-	db               *mongo.Database // For database/collection-level watch
-	collectionName   string          // For collection-level watch (empty = database-level)
+	client           *mongo.Client      // For cluster-level watch
+	db               *mongo.Database    // For database/collection-level watch
 	level            watchLevel
 	channelTransport *channel.Transport // Internal channel transport for fan-out
 	registeredEvents sync.Map           // map[string]struct{} - tracks registered event names
-	logger           *slog.Logger
-	onError          func(error)
-	bufferSize       int
-	resumeTokenStore ResumeTokenStore
-	resumeTokenID    string   // Unique identifier for resume tokens (default: hostname)
-	ackStore         AckStore
-	disableResume    bool // If true, don't persist resume tokens
-
-	// Change stream options
-	pipeline     mongo.Pipeline
-	fullDocument FullDocumentOption
-	batchSize    *int32
-	maxAwaitTime *time.Duration
 
 	// Watcher state
 	watcherOnce   sync.Once
 	watcherCtx    context.Context
 	watcherCancel context.CancelFunc
 	watcherWg     sync.WaitGroup
-
-	// Payload options
-	fullDocumentOnly         bool // If true, send only fullDocument as payload instead of ChangeEvent
-	includeUpdateDescription bool // If true, include UpdateDescription fields in metadata
-	emptyUpdates             bool // If true, deliver update events with no field changes (default: discard)
-	maxUpdatedFieldsSize     int  // Max size in bytes for updated_fields metadata (0 = unlimited)
-}
-
-// applyOptions copies configuration from the options struct into the Transport.
-func (t *Transport) applyOptions(o *transportOptions) {
-	if o.collectionName != "" {
-		t.collectionName = o.collectionName
-	}
-	if o.logger != nil {
-		t.logger = o.logger
-	}
-	if o.onError != nil {
-		t.onError = o.onError
-	}
-	if o.bufferSize > 0 {
-		t.bufferSize = o.bufferSize
-	}
-	t.resumeTokenStore = o.resumeTokenStore
-	t.resumeTokenID = o.resumeTokenID
-	t.ackStore = o.ackStore
-	t.disableResume = o.disableResume
-	t.pipeline = o.pipeline
-	t.fullDocument = o.fullDocument
-	t.batchSize = o.batchSize
-	t.maxAwaitTime = o.maxAwaitTime
-	t.fullDocumentOnly = o.fullDocumentOnly
-	t.includeUpdateDescription = o.includeUpdateDescription
-	t.emptyUpdates = o.emptyUpdates
-	t.maxUpdatedFieldsSize = o.maxUpdatedFieldsSize
 }
 
 // Option configures the MongoDB transport.
 type Option func(*transportOptions)
 
 // WithCollection sets the collection to watch for changes.
-// An empty name is ignored (database-level watch is used instead).
+// When provided, the transport watches only this collection (collection-level).
+// When omitted (or empty), the transport watches all collections in the
+// database (database-level). For cluster-level watching, use NewClusterWatch.
 func WithCollection(name string) Option {
 	return func(o *transportOptions) {
 		if name != "" {
@@ -596,24 +575,25 @@ func New(db *mongo.Database, opts ...Option) (*Transport, error) {
 		return nil, ErrDatabaseRequired
 	}
 
-	o := &transportOptions{}
+	o := transportOptions{
+		logger:     transport.Logger("transport>mongodb"),
+		onError:    func(error) {},
+		bufferSize: 100,
+	}
 	for _, opt := range opts {
-		opt(o)
+		opt(&o)
 	}
 
 	watchCtx, watchCancel := context.WithCancel(context.Background())
 
 	t := &Transport{
-		status:        statusOpen,
-		db:            db,
-		client:        db.Client(),
-		logger:        transport.Logger("transport>mongodb"),
-		onError:       func(error) {},
-		bufferSize:    100,
-		watcherCtx:    watchCtx,
-		watcherCancel: watchCancel,
+		transportOptions: o,
+		status:           statusOpen,
+		db:               db,
+		client:           db.Client(),
+		watcherCtx:       watchCtx,
+		watcherCancel:    watchCancel,
 	}
-	t.applyOptions(o)
 
 	// Determine watch level based on collection name
 	if t.collectionName != "" {
@@ -657,9 +637,13 @@ func NewClusterWatch(client *mongo.Client, opts ...Option) (*Transport, error) {
 		return nil, ErrClientRequired
 	}
 
-	o := &transportOptions{}
+	o := transportOptions{
+		logger:     transport.Logger("transport>mongodb"),
+		onError:    func(error) {},
+		bufferSize: 100,
+	}
 	for _, opt := range opts {
-		opt(o)
+		opt(&o)
 	}
 
 	// Use "admin" database for storing resume tokens
@@ -668,17 +652,14 @@ func NewClusterWatch(client *mongo.Client, opts ...Option) (*Transport, error) {
 	watchCtx, watchCancel := context.WithCancel(context.Background())
 
 	t := &Transport{
-		status:        statusOpen,
-		client:        client,
-		db:            adminDB,
-		level:         watchLevelCluster,
-		logger:        transport.Logger("transport>mongodb"),
-		onError:       func(error) {},
-		bufferSize:    100,
-		watcherCtx:    watchCtx,
-		watcherCancel: watchCancel,
+		transportOptions: o,
+		status:           statusOpen,
+		client:           client,
+		db:               adminDB,
+		level:            watchLevelCluster,
+		watcherCtx:       watchCtx,
+		watcherCancel:    watchCancel,
 	}
-	t.applyOptions(o)
 
 	if err := t.init(); err != nil {
 		watchCancel()
@@ -926,7 +907,7 @@ func (t *Transport) watchLoop(ctx context.Context) {
 				t.logger.Warn("resume token is stale (oplog rolled past), clearing and starting fresh")
 				if t.resumeTokenStore != nil {
 					resumeKey := t.resumeTokenKey()
-					clearCtx, clearCancel := context.WithTimeout(context.Background(), 10*time.Second)
+					clearCtx, clearCancel := context.WithTimeout(context.Background(), detachedTimeout)
 					if clearErr := t.resumeTokenStore.Save(clearCtx, resumeKey, nil); clearErr != nil {
 						t.logger.Error("failed to clear stale resume token", "error", clearErr)
 					}
@@ -1023,7 +1004,7 @@ func (t *Transport) watchOnce(ctx context.Context, onConnected func()) error {
 		return err
 	}
 	defer func() {
-		closeCtx, closeCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		closeCtx, closeCancel := context.WithTimeout(context.Background(), detachedTimeout)
 		defer closeCancel()
 		cs.Close(closeCtx)
 	}()
@@ -1056,6 +1037,8 @@ func (t *Transport) watchOnce(ctx context.Context, onConnected func()) error {
 
 	// Process changes
 	connected := false
+	lastTokenSave := time.Now()
+	var pendingToken bson.Raw
 	for cs.Next(ctx) {
 		if err := t.processChange(ctx, cs); err != nil {
 			t.logger.Error("failed to process change", "error", err)
@@ -1070,11 +1053,27 @@ func (t *Transport) watchOnce(ctx context.Context, onConnected func()) error {
 			onConnected()
 		}
 
-		// Persist resume token only after successful processing
+		// Throttle resume token saves to reduce write amplification.
+		// Save at most once per resumeTokenSaveInterval, buffering the
+		// latest token between saves.
 		if t.resumeTokenStore != nil {
-			if err := t.saveResumeToken(resumeKey, cs.ResumeToken()); err != nil {
-				t.logger.Warn("failed to save resume token", "error", err)
+			pendingToken = cs.ResumeToken()
+			if time.Since(lastTokenSave) >= resumeTokenSaveInterval {
+				if err := t.saveResumeToken(resumeKey, pendingToken); err != nil {
+					t.logger.Warn("failed to save resume token", "error", err)
+				} else {
+					pendingToken = nil
+					lastTokenSave = time.Now()
+				}
 			}
+		}
+	}
+
+	// Flush any pending resume token before exiting so we don't lose
+	// progress when the change stream closes cleanly or on error.
+	if t.resumeTokenStore != nil && pendingToken != nil {
+		if err := t.saveResumeToken(resumeKey, pendingToken); err != nil {
+			t.logger.Warn("failed to flush resume token on exit", "error", err)
 		}
 	}
 
@@ -1084,7 +1083,7 @@ func (t *Transport) watchOnce(ctx context.Context, onConnected func()) error {
 // saveResumeToken persists a resume token using a detached context so the
 // save succeeds even when the watcher context is being cancelled during shutdown.
 func (t *Transport) saveResumeToken(resumeKey string, token bson.Raw) error {
-	saveCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	saveCtx, cancel := context.WithTimeout(context.Background(), detachedTimeout)
 	defer cancel()
 	return t.resumeTokenStore.Save(saveCtx, resumeKey, token)
 }
@@ -1258,7 +1257,7 @@ func (t *Transport) buildMessage(event ChangeEvent, payload []byte, metadata map
 		0,
 		func(err error) error {
 			if err == nil && t.ackStore != nil {
-				ackCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				ackCtx, cancel := context.WithTimeout(context.Background(), detachedTimeout)
 				defer cancel()
 				return t.ackStore.Ack(ackCtx, event.ID)
 			}
@@ -1273,7 +1272,7 @@ func (t *Transport) storeAndPublish(event ChangeEvent, msg transport.Message) er
 	// Store as pending if ack store configured.
 	// If the store fails, skip publishing to maintain at-least-once guarantee.
 	if t.ackStore != nil {
-		storeCtx, storeCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		storeCtx, storeCancel := context.WithTimeout(context.Background(), detachedTimeout)
 		err := t.ackStore.Store(storeCtx, event.ID)
 		storeCancel()
 		if err != nil {
@@ -1283,9 +1282,10 @@ func (t *Transport) storeAndPublish(event ChangeEvent, msg transport.Message) er
 
 	// Publish to all registered events via channel transport.
 	// Use a detached context so publish succeeds even during shutdown.
-	publishCtx, publishCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	publishCtx, publishCancel := context.WithTimeout(context.Background(), detachedTimeout)
 	defer publishCancel()
 
+	var publishErr error
 	t.registeredEvents.Range(func(key, value any) bool {
 		eventName, ok := key.(string)
 		if !ok {
@@ -1293,11 +1293,12 @@ func (t *Transport) storeAndPublish(event ChangeEvent, msg transport.Message) er
 		}
 		if err := t.channelTransport.Publish(publishCtx, eventName, msg); err != nil {
 			t.logger.Warn("failed to publish to channel transport", "event", eventName, "error", err)
+			publishErr = errors.Join(publishErr, fmt.Errorf("publish to %s: %w", eventName, err))
 		}
 		return true
 	})
 
-	return nil
+	return publishErr
 }
 
 // extractChangeEvent extracts a ChangeEvent from raw BSON.
@@ -1306,8 +1307,20 @@ func (t *Transport) extractChangeEvent(raw bson.M) ChangeEvent {
 		Timestamp: time.Now(),
 	}
 
-	// Extract namespace (database and collection) from ns field
-	// MongoDB change events include: ns: {db: "mydb", coll: "mycoll"}
+	t.extractNamespace(raw, &event)
+	extractEventID(raw, &event)
+	extractOperationType(raw, &event)
+	extractDocumentKey(raw, &event)
+	extractFullDocument(raw, &event)
+	extractUpdateDescription(raw, &event)
+	extractTimestamp(raw, &event)
+
+	return event
+}
+
+// extractNamespace populates Database, Collection, and Namespace from the
+// raw change event's "ns" field, falling back to Transport-level defaults.
+func (t *Transport) extractNamespace(raw bson.M, event *ChangeEvent) {
 	if ns, ok := raw["ns"].(bson.M); ok {
 		if db, ok := ns["db"].(string); ok {
 			event.Database = db
@@ -1316,19 +1329,18 @@ func (t *Transport) extractChangeEvent(raw bson.M) ChangeEvent {
 			event.Collection = coll
 		}
 	}
-
-	// Fallback to configured values for collection-level watch
 	if event.Database == "" && t.db != nil {
 		event.Database = t.db.Name()
 	}
 	if event.Collection == "" && t.collectionName != "" {
 		event.Collection = t.collectionName
 	}
-
-	// Build namespace string
 	event.Namespace = event.Database + "." + event.Collection
+}
 
-	// Extract _id (resume token) as event ID
+// extractEventID populates the event ID from the resume token "_id._data"
+// field, falling back to a generated ID.
+func extractEventID(raw bson.M, event *ChangeEvent) {
 	if id, ok := raw["_id"].(bson.M); ok {
 		if data, ok := id["_data"].(string); ok {
 			event.ID = data
@@ -1337,24 +1349,30 @@ func (t *Transport) extractChangeEvent(raw bson.M) ChangeEvent {
 	if event.ID == "" {
 		event.ID = transport.NewID()
 	}
+}
 
-	// Extract operation type
+// extractOperationType populates the operation type from the raw change event.
+func extractOperationType(raw bson.M, event *ChangeEvent) {
 	if opType, ok := raw["operationType"].(string); ok {
 		event.OperationType = OperationType(opType)
 	}
+}
 
-	// Extract document key - handle any _id type (ObjectID, string, UUID, etc.)
+// extractDocumentKey populates the document key from the raw change event.
+func extractDocumentKey(raw bson.M, event *ChangeEvent) {
 	if docKey, ok := raw["documentKey"].(bson.M); ok {
 		event.DocumentKey = formatDocumentKey(docKey["_id"])
 	}
+}
 
-	// Extract full document and convert to JSON
+// extractFullDocument populates the JSON-encoded full document from the raw
+// change event. Handles both bson.M and bson.Raw representations.
+func extractFullDocument(raw bson.M, event *ChangeEvent) {
 	if fullDoc, ok := raw["fullDocument"].(bson.M); ok {
 		if jsonData, err := bsonToJSON(fullDoc); err == nil {
 			event.FullDocument = jsonData
 		}
 	} else if fullDoc, ok := raw["fullDocument"].(bson.Raw); ok {
-		// Convert bson.Raw to bson.M first, then to JSON
 		var doc bson.M
 		if err := bson.Unmarshal(fullDoc, &doc); err == nil {
 			if jsonData, err := bsonToJSON(doc); err == nil {
@@ -1362,39 +1380,43 @@ func (t *Transport) extractChangeEvent(raw bson.M) ChangeEvent {
 			}
 		}
 	}
+}
 
-	// Extract update description
-	if updateDesc, ok := raw["updateDescription"].(bson.M); ok {
-		event.UpdateDesc = &UpdateDescription{}
-		if updated, ok := updateDesc["updatedFields"].(bson.M); ok {
-			// Convert bson.M to map[string]any (they're compatible but need explicit conversion)
-			event.UpdateDesc.UpdatedFields = bsonMToMap(updated)
-		}
-		if removed, ok := updateDesc["removedFields"].(bson.A); ok {
-			for _, f := range removed {
-				if s, ok := f.(string); ok {
-					event.UpdateDesc.RemovedFields = append(event.UpdateDesc.RemovedFields, s)
-				}
+// extractUpdateDescription populates the UpdateDescription from the raw
+// change event's "updateDescription" field.
+func extractUpdateDescription(raw bson.M, event *ChangeEvent) {
+	updateDesc, ok := raw["updateDescription"].(bson.M)
+	if !ok {
+		return
+	}
+	event.UpdateDesc = &UpdateDescription{}
+	if updated, ok := updateDesc["updatedFields"].(bson.M); ok {
+		event.UpdateDesc.UpdatedFields = bsonMToMap(updated)
+	}
+	if removed, ok := updateDesc["removedFields"].(bson.A); ok {
+		for _, f := range removed {
+			if s, ok := f.(string); ok {
+				event.UpdateDesc.RemovedFields = append(event.UpdateDesc.RemovedFields, s)
 			}
 		}
-		if truncated, ok := updateDesc["truncatedArrays"].(bson.A); ok {
-			for _, f := range truncated {
-				// Each element is {field: "name", newSize: N}
-				if ta, ok := f.(bson.M); ok {
-					if field, ok := ta["field"].(string); ok {
-						event.UpdateDesc.TruncatedArrays = append(event.UpdateDesc.TruncatedArrays, field)
-					}
+	}
+	if truncated, ok := updateDesc["truncatedArrays"].(bson.A); ok {
+		for _, f := range truncated {
+			if ta, ok := f.(bson.M); ok {
+				if field, ok := ta["field"].(string); ok {
+					event.UpdateDesc.TruncatedArrays = append(event.UpdateDesc.TruncatedArrays, field)
 				}
 			}
 		}
 	}
+}
 
-	// Extract timestamp
+// extractTimestamp populates the event timestamp from the raw change event's
+// "clusterTime" field.
+func extractTimestamp(raw bson.M, event *ChangeEvent) {
 	if ts, ok := raw["clusterTime"].(primitive.Timestamp); ok {
 		event.Timestamp = time.Unix(int64(ts.T), 0)
 	}
-
-	return event
 }
 
 // formatDocumentKey converts any MongoDB _id type to a string representation.
