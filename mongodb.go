@@ -103,16 +103,15 @@ const (
 	statusOpen   int32 = 1
 )
 
-// WatchLevel indicates what level of MongoDB hierarchy to watch.
-type WatchLevel int
+// watchLevel indicates what level of MongoDB hierarchy to watch.
+// This is an internal detail determined by the constructor (New vs NewClusterWatch)
+// and the WithCollection option.
+type watchLevel int
 
 const (
-	// WatchLevelCollection watches a single collection.
-	WatchLevelCollection WatchLevel = iota
-	// WatchLevelDatabase watches all collections in a database.
-	WatchLevelDatabase
-	// WatchLevelCluster watches all databases in a cluster.
-	WatchLevelCluster
+	watchLevelCollection watchLevel = iota
+	watchLevelDatabase
+	watchLevelCluster
 )
 
 // OperationType represents the type of change operation
@@ -202,19 +201,41 @@ type ResumeTokenStore interface {
 
 // AckStore tracks which change events have been acknowledged.
 // This enables at-least-once delivery by tracking processed events.
+//
+// The transport only requires Store and Ack. Implementations may provide
+// additional query methods (e.g., MongoAckStore.IsPending) for external use.
 type AckStore interface {
 	// Store marks an event as pending (not yet acknowledged).
 	Store(ctx context.Context, eventID string) error
 
 	// Ack marks an event as acknowledged (successfully processed).
 	Ack(ctx context.Context, eventID string) error
-
-	// IsPending checks if an event is still pending acknowledgment.
-	IsPending(ctx context.Context, eventID string) (bool, error)
 }
 
-// Default collection name for storing resume tokens
-const DefaultResumeTokenCollection = "_event_resume_tokens"
+// defaultResumeTokenCollection is the default collection name for storing resume tokens.
+const defaultResumeTokenCollection = "_event_resume_tokens"
+
+// options holds configuration values set via Option functions.
+// This struct is unexported to prevent direct access — only Option functions
+// can modify it.
+type transportOptions struct {
+	collectionName           string
+	logger                   *slog.Logger
+	onError                  func(error)
+	bufferSize               int
+	resumeTokenStore         ResumeTokenStore
+	resumeTokenID            string
+	ackStore                 AckStore
+	disableResume            bool
+	pipeline                 mongo.Pipeline
+	fullDocument             FullDocumentOption
+	batchSize                *int32
+	maxAwaitTime             *time.Duration
+	fullDocumentOnly         bool
+	includeUpdateDescription bool
+	emptyUpdates             bool
+	maxUpdatedFieldsSize     int
+}
 
 // Transport implements transport.Transport using MongoDB change streams.
 type Transport struct {
@@ -222,7 +243,7 @@ type Transport struct {
 	client           *mongo.Client   // For cluster-level watch
 	db               *mongo.Database // For database/collection-level watch
 	collectionName   string          // For collection-level watch (empty = database-level)
-	watchLevel       WatchLevel
+	level            watchLevel
 	channelTransport *channel.Transport // Internal channel transport for fan-out
 	registeredEvents sync.Map           // map[string]struct{} - tracks registered event names
 	logger           *slog.Logger
@@ -248,46 +269,74 @@ type Transport struct {
 	// Payload options
 	fullDocumentOnly         bool // If true, send only fullDocument as payload instead of ChangeEvent
 	includeUpdateDescription bool // If true, include UpdateDescription fields in metadata
-	emptyUpdates       bool // If true, deliver update events with no field changes (default: discard)
-	maxUpdatedFieldsSize int // Max size in bytes for updated_fields metadata (0 = unlimited)
+	emptyUpdates             bool // If true, deliver update events with no field changes (default: discard)
+	maxUpdatedFieldsSize     int  // Max size in bytes for updated_fields metadata (0 = unlimited)
 }
 
-// Option configures the MongoDB transport
-type Option func(*Transport)
+// applyOptions copies configuration from the options struct into the Transport.
+func (t *Transport) applyOptions(o *transportOptions) {
+	if o.collectionName != "" {
+		t.collectionName = o.collectionName
+	}
+	if o.logger != nil {
+		t.logger = o.logger
+	}
+	if o.onError != nil {
+		t.onError = o.onError
+	}
+	if o.bufferSize > 0 {
+		t.bufferSize = o.bufferSize
+	}
+	t.resumeTokenStore = o.resumeTokenStore
+	t.resumeTokenID = o.resumeTokenID
+	t.ackStore = o.ackStore
+	t.disableResume = o.disableResume
+	t.pipeline = o.pipeline
+	t.fullDocument = o.fullDocument
+	t.batchSize = o.batchSize
+	t.maxAwaitTime = o.maxAwaitTime
+	t.fullDocumentOnly = o.fullDocumentOnly
+	t.includeUpdateDescription = o.includeUpdateDescription
+	t.emptyUpdates = o.emptyUpdates
+	t.maxUpdatedFieldsSize = o.maxUpdatedFieldsSize
+}
+
+// Option configures the MongoDB transport.
+type Option func(*transportOptions)
 
 // WithCollection sets the collection to watch for changes.
 // An empty name is ignored (database-level watch is used instead).
 func WithCollection(name string) Option {
-	return func(t *Transport) {
+	return func(o *transportOptions) {
 		if name != "" {
-			t.collectionName = name
+			o.collectionName = name
 		}
 	}
 }
 
 // WithLogger sets the logger.
 func WithLogger(logger *slog.Logger) Option {
-	return func(t *Transport) {
+	return func(o *transportOptions) {
 		if logger != nil {
-			t.logger = logger
+			o.logger = logger
 		}
 	}
 }
 
 // WithErrorHandler sets the error callback.
 func WithErrorHandler(fn func(error)) Option {
-	return func(t *Transport) {
+	return func(o *transportOptions) {
 		if fn != nil {
-			t.onError = fn
+			o.onError = fn
 		}
 	}
 }
 
 // WithBufferSize sets the default buffer size for subscriptions.
 func WithBufferSize(size int) Option {
-	return func(t *Transport) {
+	return func(o *transportOptions) {
 		if size > 0 {
-			t.bufferSize = size
+			o.bufferSize = size
 		}
 	}
 }
@@ -296,8 +345,8 @@ func WithBufferSize(size int) Option {
 // By default, the transport automatically stores resume tokens in the
 // "_event_resume_tokens" collection. Use this option to override the default.
 func WithResumeTokenStore(store ResumeTokenStore) Option {
-	return func(t *Transport) {
-		t.resumeTokenStore = store
+	return func(o *transportOptions) {
+		o.resumeTokenStore = store
 	}
 }
 
@@ -312,8 +361,8 @@ func WithResumeTokenStore(store ResumeTokenStore) Option {
 //	    mongodb.WithResumeTokenCollection(client.Database("internal"), "_resume_tokens"),
 //	)
 func WithResumeTokenCollection(db *mongo.Database, collectionName string) Option {
-	return func(t *Transport) {
-		t.resumeTokenStore = NewMongoResumeTokenStore(db.Collection(collectionName))
+	return func(o *transportOptions) {
+		o.resumeTokenStore = NewMongoResumeTokenStore(db.Collection(collectionName))
 	}
 }
 
@@ -330,8 +379,8 @@ func WithResumeTokenCollection(db *mongo.Database, collectionName string) Option
 // Use this only for scenarios where missing changes during restarts is acceptable,
 // such as real-time dashboards that don't need historical accuracy.
 func WithoutResume() Option {
-	return func(t *Transport) {
-		t.disableResume = true
+	return func(o *transportOptions) {
+		o.disableResume = true
 	}
 }
 
@@ -359,16 +408,16 @@ func WithoutResume() Option {
 //	// Shared resume token across all instances
 //	mongodb.New(db, mongodb.WithResumeTokenID("shared"))
 func WithResumeTokenID(id string) Option {
-	return func(t *Transport) {
-		t.resumeTokenID = id
+	return func(o *transportOptions) {
+		o.resumeTokenID = id
 	}
 }
 
 // WithAckStore sets the store for tracking acknowledgments.
 // This enables at-least-once delivery semantics.
 func WithAckStore(store AckStore) Option {
-	return func(t *Transport) {
-		t.ackStore = store
+	return func(o *transportOptions) {
+		o.ackStore = store
 	}
 }
 
@@ -383,8 +432,8 @@ func WithAckStore(store AckStore) Option {
 //	}
 //	mongodb.WithPipeline(pipeline)
 func WithPipeline(pipeline mongo.Pipeline) Option {
-	return func(t *Transport) {
-		t.pipeline = pipeline
+	return func(o *transportOptions) {
+		o.pipeline = pipeline
 	}
 }
 
@@ -403,22 +452,22 @@ func WithPipeline(pipeline mongo.Pipeline) Option {
 //	    mongodb.WithFullDocument(mongodb.FullDocumentUpdateLookup),
 //	)
 func WithFullDocument(option FullDocumentOption) Option {
-	return func(t *Transport) {
-		t.fullDocument = option
+	return func(o *transportOptions) {
+		o.fullDocument = option
 	}
 }
 
 // WithBatchSize sets the batch size for change stream operations.
 func WithBatchSize(size int32) Option {
-	return func(t *Transport) {
-		t.batchSize = &size
+	return func(o *transportOptions) {
+		o.batchSize = &size
 	}
 }
 
 // WithMaxAwaitTime sets the maximum time to wait for new changes.
 func WithMaxAwaitTime(d time.Duration) Option {
-	return func(t *Transport) {
-		t.maxAwaitTime = &d
+	return func(o *transportOptions) {
+		o.maxAwaitTime = &d
 	}
 }
 
@@ -457,8 +506,8 @@ func WithMaxAwaitTime(d time.Duration) Option {
 //	    return nil
 //	})
 func WithFullDocumentOnly() Option {
-	return func(t *Transport) {
-		t.fullDocumentOnly = true
+	return func(o *transportOptions) {
+		o.fullDocumentOnly = true
 	}
 }
 
@@ -476,8 +525,8 @@ func WithFullDocumentOnly() Option {
 // Use ContextUpdateDescription(ctx) to extract the UpdateDescription from
 // the handler context.
 func WithUpdateDescription() Option {
-	return func(t *Transport) {
-		t.includeUpdateDescription = true
+	return func(o *transportOptions) {
+		o.includeUpdateDescription = true
 	}
 }
 
@@ -490,8 +539,8 @@ func WithUpdateDescription() Option {
 //   - Internal replication events
 //   - Updates that only affect internal fields
 func WithEmptyUpdates() Option {
-	return func(t *Transport) {
-		t.emptyUpdates = true
+	return func(o *transportOptions) {
+		o.emptyUpdates = true
 	}
 }
 
@@ -508,11 +557,11 @@ func WithEmptyUpdates() Option {
 // A value of 0 or negative means unlimited (no size limit).
 // This option implicitly enables WithUpdateDescription().
 func WithMaxUpdatedFieldsSize(bytes int) Option {
-	return func(t *Transport) {
+	return func(o *transportOptions) {
 		if bytes > 0 {
-			t.maxUpdatedFieldsSize = bytes
+			o.maxUpdatedFieldsSize = bytes
 		}
-		t.includeUpdateDescription = true
+		o.includeUpdateDescription = true
 	}
 }
 
@@ -547,6 +596,11 @@ func New(db *mongo.Database, opts ...Option) (*Transport, error) {
 		return nil, ErrDatabaseRequired
 	}
 
+	o := &transportOptions{}
+	for _, opt := range opts {
+		opt(o)
+	}
+
 	watchCtx, watchCancel := context.WithCancel(context.Background())
 
 	t := &Transport{
@@ -559,16 +613,13 @@ func New(db *mongo.Database, opts ...Option) (*Transport, error) {
 		watcherCtx:    watchCtx,
 		watcherCancel: watchCancel,
 	}
-
-	for _, opt := range opts {
-		opt(t)
-	}
+	t.applyOptions(o)
 
 	// Determine watch level based on collection name
 	if t.collectionName != "" {
-		t.watchLevel = WatchLevelCollection
+		t.level = watchLevelCollection
 	} else {
-		t.watchLevel = WatchLevelDatabase
+		t.level = watchLevelDatabase
 	}
 
 	if err := t.init(); err != nil {
@@ -606,6 +657,11 @@ func NewClusterWatch(client *mongo.Client, opts ...Option) (*Transport, error) {
 		return nil, ErrClientRequired
 	}
 
+	o := &transportOptions{}
+	for _, opt := range opts {
+		opt(o)
+	}
+
 	// Use "admin" database for storing resume tokens
 	adminDB := client.Database("admin")
 
@@ -615,17 +671,14 @@ func NewClusterWatch(client *mongo.Client, opts ...Option) (*Transport, error) {
 		status:        statusOpen,
 		client:        client,
 		db:            adminDB,
-		watchLevel:    WatchLevelCluster,
+		level:         watchLevelCluster,
 		logger:        transport.Logger("transport>mongodb"),
 		onError:       func(error) {},
 		bufferSize:    100,
 		watcherCtx:    watchCtx,
 		watcherCancel: watchCancel,
 	}
-
-	for _, opt := range opts {
-		opt(t)
-	}
+	t.applyOptions(o)
 
 	if err := t.init(); err != nil {
 		watchCancel()
@@ -675,10 +728,10 @@ func (t *Transport) init() error {
 
 	// Auto-create resume token store if not disabled and not provided
 	if !t.disableResume && t.resumeTokenStore == nil {
-		t.resumeTokenStore = NewMongoResumeTokenStore(t.db.Collection(DefaultResumeTokenCollection))
+		t.resumeTokenStore = NewMongoResumeTokenStore(t.db.Collection(defaultResumeTokenCollection))
 		t.logger.Debug("using default resume token collection",
 			"database", t.db.Name(),
-			"collection", DefaultResumeTokenCollection)
+			"collection", defaultResumeTokenCollection)
 	}
 
 	return nil
@@ -855,8 +908,8 @@ func (t *Transport) watchLoop(ctx context.Context) {
 		default:
 		}
 
-		if err := t.watchOnce(ctx); err != nil {
-			if errors.Is(err, context.Canceled) {
+		if err := t.watchOnce(ctx, backoff.Reset); err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				return
 			}
 
@@ -896,19 +949,27 @@ func (t *Transport) watchLoop(ctx context.Context) {
 
 // isChangeStreamHistoryLost checks if the error indicates the resume token
 // is no longer valid because the oplog has rolled past that position.
+// Uses the MongoDB driver's typed error API (error code 286) with a
+// string-based fallback for wrapped or non-standard errors.
 func isChangeStreamHistoryLost(err error) bool {
 	if err == nil {
 		return false
 	}
-	// Check for MongoDB error code 286 (ChangeStreamHistoryLost)
-	// or the error message containing the error name
+	// Prefer typed error check via mongo.ServerError interface (error code 286)
+	var se mongo.ServerError
+	if errors.As(err, &se) {
+		return se.HasErrorCode(286)
+	}
+	// Fallback: string matching for wrapped or non-standard errors
 	errStr := err.Error()
 	return strings.Contains(errStr, "ChangeStreamHistoryLost") ||
 		strings.Contains(errStr, "resume point may no longer be in the oplog")
 }
 
 // watchOnce creates and processes a single change stream.
-func (t *Transport) watchOnce(ctx context.Context) error {
+// onConnected is called after the first successfully processed change event,
+// allowing the caller to reset backoff state on successful reconnection.
+func (t *Transport) watchOnce(ctx context.Context, onConnected func()) error {
 	// Build change stream options
 	csOpts := options.ChangeStream()
 
@@ -942,18 +1003,18 @@ func (t *Transport) watchOnce(ctx context.Context) error {
 	var cs *mongo.ChangeStream
 	var err error
 
-	switch t.watchLevel {
-	case WatchLevelCollection:
+	switch t.level {
+	case watchLevelCollection:
 		cs, err = t.db.Collection(t.collectionName).Watch(ctx, t.pipeline, csOpts)
 		t.logger.Info("change stream opened",
 			"watch_level", "collection",
 			"database", t.db.Name(),
 			"target_collection", t.collectionName)
-	case WatchLevelDatabase:
+	case watchLevelDatabase:
 		cs, err = t.db.Watch(ctx, t.pipeline, csOpts)
 		t.logger.Info("change stream opened", "watch_level", "database",
 			"database", t.db.Name())
-	case WatchLevelCluster:
+	case watchLevelCluster:
 		cs, err = t.client.Watch(ctx, t.pipeline, csOpts)
 		t.logger.Info("change stream opened", "watch_level", "cluster")
 	}
@@ -967,21 +1028,21 @@ func (t *Transport) watchOnce(ctx context.Context) error {
 		cs.Close(closeCtx)
 	}()
 
-	// If no existing token, save the current position and start from here
-	// This prevents processing historical oplog events on first start
+	// If no existing token, save the current position and start from here.
+	// This prevents processing historical oplog events on first start.
 	if !hasExistingToken && t.resumeTokenStore != nil {
-		// Get a single event to establish our position, or use current token
-		// We need to call TryNext to get a resume token without blocking
+		// Get a single event to establish our position, or use current token.
+		// We need to call TryNext to get a resume token without blocking.
 		if cs.TryNext(ctx) {
-			// Got an event - save token and process it
-			if err := t.saveResumeToken(resumeKey, cs.ResumeToken()); err != nil {
+			// Got an event — process it first, then save token only on success.
+			if err := t.processChange(ctx, cs); err != nil {
+				t.logger.Error("failed to process first change", "error", err)
+				t.onError(err)
+				// Don't save resume token — allows reprocessing on next restart
+			} else if err := t.saveResumeToken(resumeKey, cs.ResumeToken()); err != nil {
 				t.logger.Warn("failed to save initial resume token", "error", err)
 			} else {
-				t.logger.Info("saved initial resume token, starting from current position", "key", resumeKey)
-			}
-			// Process this first event
-			if err := t.processChange(ctx, cs); err != nil {
-				t.logger.Error("failed to process change", "error", err)
+				t.logger.Info("saved initial resume token", "key", resumeKey)
 			}
 		} else if cs.ResumeToken() != nil {
 			// No event yet, but we have a resume token from the cursor
@@ -994,12 +1055,19 @@ func (t *Transport) watchOnce(ctx context.Context) error {
 	}
 
 	// Process changes
+	connected := false
 	for cs.Next(ctx) {
 		if err := t.processChange(ctx, cs); err != nil {
 			t.logger.Error("failed to process change", "error", err)
 			t.onError(err)
 			// Skip resume token save on failure to allow reprocessing
 			continue
+		}
+
+		// Signal successful processing so caller can reset backoff
+		if !connected {
+			connected = true
+			onConnected()
 		}
 
 		// Persist resume token only after successful processing
@@ -1026,12 +1094,12 @@ func (t *Transport) saveResumeToken(resumeKey string, token bson.Raw) error {
 // and id is the resumeTokenID (defaults to hostname).
 func (t *Transport) resumeTokenKey() string {
 	var namespace string
-	switch t.watchLevel {
-	case WatchLevelCollection:
+	switch t.level {
+	case watchLevelCollection:
 		namespace = t.db.Name() + "." + t.collectionName
-	case WatchLevelDatabase:
+	case watchLevelDatabase:
 		namespace = t.db.Name() + ".*"
-	case WatchLevelCluster:
+	case watchLevelCluster:
 		namespace = "*.*"
 	default:
 		namespace = "default"
@@ -1041,20 +1109,34 @@ func (t *Transport) resumeTokenKey() string {
 
 // watchLevelString returns a human-readable string for the watch level.
 func (t *Transport) watchLevelString() string {
-	switch t.watchLevel {
-	case WatchLevelCollection:
+	switch t.level {
+	case watchLevelCollection:
 		return "collection"
-	case WatchLevelDatabase:
+	case watchLevelDatabase:
 		return "database"
-	case WatchLevelCluster:
+	case watchLevelCluster:
 		return "cluster"
 	default:
 		return "unknown"
 	}
 }
 
-// processChange processes a single change event.
-func (t *Transport) processChange(ctx context.Context, cs *mongo.ChangeStream) error {
+// changeStream abstracts the methods used from *mongo.ChangeStream,
+// enabling unit testing of the processing pipeline without a live MongoDB connection.
+type changeStream interface {
+	Decode(val interface{}) error
+	Next(ctx context.Context) bool
+	TryNext(ctx context.Context) bool
+	ResumeToken() bson.Raw
+	Err() error
+	Close(ctx context.Context) error
+}
+
+// Compile-time check that *mongo.ChangeStream satisfies changeStream.
+var _ changeStream = (*mongo.ChangeStream)(nil)
+
+// processChange processes a single change event from the change stream.
+func (t *Transport) processChange(ctx context.Context, cs changeStream) error {
 	// Decode raw change document
 	var raw bson.M
 	if err := cs.Decode(&raw); err != nil {
@@ -1072,121 +1154,143 @@ func (t *Transport) processChange(ctx context.Context, cs *mongo.ChangeStream) e
 		return nil
 	}
 
-	// Determine payload and content type based on mode
-	var payload []byte
-	var err error
-	var contentType string
+	// Build payload and content type
+	payload, contentType, err := t.buildPayload(raw, changeEvent)
+	if err != nil {
+		return err
+	}
+	if payload == nil {
+		return nil // Event was skipped (e.g., no fullDocument)
+	}
 
+	// Build metadata and message
+	metadata := t.buildMetadata(changeEvent, contentType)
+	msg := t.buildMessage(changeEvent, payload, metadata)
+
+	// Store as pending and publish
+	return t.storeAndPublish(changeEvent, msg)
+}
+
+// buildPayload creates the event payload based on transport mode.
+// Returns nil payload if the event should be skipped.
+func (t *Transport) buildPayload(raw bson.M, event ChangeEvent) ([]byte, string, error) {
 	if t.fullDocumentOnly {
-		contentType = "application/bson"
-		// Send the raw fullDocument BSON - preserves all MongoDB types
-		if fullDoc, ok := raw["fullDocument"]; ok && fullDoc != nil {
-			// Marshal the raw fullDocument directly as BSON
-			payload, err = bson.Marshal(fullDoc)
-			if err != nil {
-				return err
-			}
-		}
-		if len(payload) == 0 {
-			// For delete events, send just the document ID as a string
-			// This allows subscribers using event.Event[string] to receive the ID directly
-			if changeEvent.OperationType == OperationDelete {
-				// DocumentKey is already extracted as string in changeEvent
-				if changeEvent.DocumentKey != "" {
-					payload = []byte(changeEvent.DocumentKey)
-					// Use plain text content type for string ID
-					contentType = "text/plain"
-				}
-			}
-		}
-		if len(payload) == 0 {
-			// Skip events without fullDocument and without documentKey
-			t.logger.Debug("skipping event without fullDocument",
-				"operation", changeEvent.OperationType,
-				"document_key", changeEvent.DocumentKey)
-			return nil
-		}
-	} else {
-		contentType = "application/json"
-		// Send the entire ChangeEvent as JSON (for mongodb.ChangeEvent subscribers)
-		payload, err = json.Marshal(changeEvent)
+		return t.buildFullDocumentPayload(raw, event)
+	}
+	// Send the entire ChangeEvent as JSON
+	payload, err := json.Marshal(event)
+	if err != nil {
+		return nil, "", err
+	}
+	return payload, "application/json", nil
+}
+
+// buildFullDocumentPayload creates a BSON payload from the raw fullDocument.
+func (t *Transport) buildFullDocumentPayload(raw bson.M, event ChangeEvent) ([]byte, string, error) {
+	contentType := "application/bson"
+
+	// Send the raw fullDocument BSON - preserves all MongoDB types
+	if fullDoc, ok := raw["fullDocument"]; ok && fullDoc != nil {
+		payload, err := bson.Marshal(fullDoc)
 		if err != nil {
-			return err
+			return nil, "", err
+		}
+		if len(payload) > 0 {
+			return payload, contentType, nil
 		}
 	}
 
-	// Build metadata
+	// For delete events, send just the document ID as a string
+	if event.OperationType == OperationDelete && event.DocumentKey != "" {
+		return []byte(event.DocumentKey), "text/plain", nil
+	}
+
+	// Skip events without fullDocument and without documentKey
+	t.logger.Debug("skipping event without fullDocument",
+		"operation", event.OperationType,
+		"document_key", event.DocumentKey)
+	return nil, "", nil
+}
+
+// buildMetadata creates the metadata map for an event message.
+func (t *Transport) buildMetadata(event ChangeEvent, contentType string) map[string]string {
 	metadata := map[string]string{
 		MetadataContentType: contentType,
-		MetadataOperation:   string(changeEvent.OperationType),
-		MetadataDatabase:    changeEvent.Database,
-		MetadataCollection:  changeEvent.Collection,
-		MetadataNamespace:   changeEvent.Namespace,
-		MetadataDocumentKey: changeEvent.DocumentKey,
-		MetadataClusterTime: changeEvent.Timestamp.Format(time.RFC3339Nano),
+		MetadataOperation:   string(event.OperationType),
+		MetadataDatabase:    event.Database,
+		MetadataCollection:  event.Collection,
+		MetadataNamespace:   event.Namespace,
+		MetadataDocumentKey: event.DocumentKey,
+		MetadataClusterTime: event.Timestamp.Format(time.RFC3339Nano),
 	}
 
 	// Include update description fields when enabled
-	if t.includeUpdateDescription && changeEvent.UpdateDesc != nil {
-		// RemovedFields only contains field names, always include
-		if changeEvent.UpdateDesc.RemovedFields != nil {
-			if data, err := json.Marshal(changeEvent.UpdateDesc.RemovedFields); err == nil {
+	if t.includeUpdateDescription && event.UpdateDesc != nil {
+		if event.UpdateDesc.RemovedFields != nil {
+			if data, err := json.Marshal(event.UpdateDesc.RemovedFields); err == nil {
 				metadata[MetadataRemovedFields] = string(data)
 			}
 		}
-
-		// UpdatedFields contains values and can be large; apply size limit
-		if changeEvent.UpdateDesc.UpdatedFields != nil {
-			if data, err := json.Marshal(changeEvent.UpdateDesc.UpdatedFields); err == nil {
+		if event.UpdateDesc.UpdatedFields != nil {
+			if data, err := json.Marshal(event.UpdateDesc.UpdatedFields); err == nil {
 				if t.maxUpdatedFieldsSize <= 0 || len(data) <= t.maxUpdatedFieldsSize {
 					metadata[MetadataUpdatedFields] = string(data)
 				} else {
 					t.logger.Debug("updated fields exceeds max size, omitting from metadata",
 						"size", len(data),
 						"max", t.maxUpdatedFieldsSize,
-						"document_key", changeEvent.DocumentKey)
+						"document_key", event.DocumentKey)
 				}
 			}
 		}
 	}
 
-	// Create message with ack function
-	msg := transport.NewMessageWithAck(
-		changeEvent.ID,
-		"mongodb://"+changeEvent.Database+"/"+changeEvent.Collection,
+	return metadata
+}
+
+// buildMessage creates a transport message with an ack callback.
+func (t *Transport) buildMessage(event ChangeEvent, payload []byte, metadata map[string]string) transport.Message {
+	return transport.NewMessageWithAck(
+		event.ID,
+		"mongodb://"+event.Database+"/"+event.Collection,
 		payload,
 		metadata,
 		0,
 		func(err error) error {
 			if err == nil && t.ackStore != nil {
-				// Use a detached context so ack succeeds even if watcher context is canceled
 				ackCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 				defer cancel()
-				return t.ackStore.Ack(ackCtx, changeEvent.ID)
+				return t.ackStore.Ack(ackCtx, event.ID)
 			}
 			return nil
 		},
 	)
+}
 
+// storeAndPublish records the event in the ack store (if configured) and
+// publishes it to all registered event subscribers.
+func (t *Transport) storeAndPublish(event ChangeEvent, msg transport.Message) error {
 	// Store as pending if ack store configured.
-	// Use a detached context so the store succeeds even during shutdown.
+	// If the store fails, skip publishing to maintain at-least-once guarantee.
 	if t.ackStore != nil {
 		storeCtx, storeCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		if err := t.ackStore.Store(storeCtx, changeEvent.ID); err != nil {
-			t.logger.Warn("failed to store pending event", "event_id", changeEvent.ID, "error", err)
-		}
+		err := t.ackStore.Store(storeCtx, event.ID)
 		storeCancel()
+		if err != nil {
+			return fmt.Errorf("store pending event %s: %w", event.ID, err)
+		}
 	}
 
 	// Publish to all registered events via channel transport.
-	// Use a detached context so publish succeeds even if the watcher context
-	// is being cancelled during shutdown.
+	// Use a detached context so publish succeeds even during shutdown.
 	publishCtx, publishCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer publishCancel()
 
-	// Each registered event's subscribers receive the change
 	t.registeredEvents.Range(func(key, value any) bool {
-		eventName := key.(string)
+		eventName, ok := key.(string)
+		if !ok {
+			return true
+		}
 		if err := t.channelTransport.Publish(publishCtx, eventName, msg); err != nil {
 			t.logger.Warn("failed to publish to channel transport", "event", eventName, "error", err)
 		}

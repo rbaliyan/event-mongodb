@@ -35,10 +35,12 @@ MongoDB Change Stream transport (`github.com/rbaliyan/event-mongodb`) for the ev
 
 ### Watch Levels
 
+Watch level is determined by the constructor and options (unexported internally):
+
 ```
-WatchLevelCollection  - Watch single collection
-WatchLevelDatabase    - Watch all collections in database
-WatchLevelCluster     - Watch all databases in cluster
+Collection  - Watch single collection (New + WithCollection)
+Database    - Watch all collections in database (New without WithCollection)
+Cluster     - Watch all databases in cluster (NewClusterWatch)
 ```
 
 ### Key Interfaces
@@ -54,7 +56,6 @@ type ResumeTokenStore interface {
 type AckStore interface {
     Store(ctx context.Context, eventID string) error
     Ack(ctx context.Context, eventID string) error
-    IsPending(ctx context.Context, eventID string) (bool, error)
 }
 ```
 
@@ -134,7 +135,7 @@ Resume token saves use a detached context (`context.WithTimeout(context.Backgrou
 ### Functional Options
 
 ```go
-type Option func(*Transport)
+type Option func(*transportOptions)  // unexported options struct
 
 mongodb.New(db,
     mongodb.WithCollection("orders"),

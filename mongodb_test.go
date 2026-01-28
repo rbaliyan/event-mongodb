@@ -652,86 +652,86 @@ func TestContextUpdateDescription(t *testing.T) {
 
 func TestWithCollection(t *testing.T) {
 	t.Run("sets collection name", func(t *testing.T) {
-		tr := &Transport{}
-		WithCollection("orders")(tr)
-		if tr.collectionName != "orders" {
-			t.Errorf("collectionName = %q, want orders", tr.collectionName)
+		o := &transportOptions{}
+		WithCollection("orders")(o)
+		if o.collectionName != "orders" {
+			t.Errorf("collectionName = %q, want orders", o.collectionName)
 		}
 	})
 
 	t.Run("empty string is ignored", func(t *testing.T) {
-		tr := &Transport{collectionName: "existing"}
-		WithCollection("")(tr)
-		if tr.collectionName != "existing" {
-			t.Errorf("collectionName = %q, want existing (unchanged)", tr.collectionName)
+		o := &transportOptions{collectionName: "existing"}
+		WithCollection("")(o)
+		if o.collectionName != "existing" {
+			t.Errorf("collectionName = %q, want existing (unchanged)", o.collectionName)
 		}
 	})
 }
 
 func TestWithUpdateDescription(t *testing.T) {
-	tr := &Transport{}
-	WithUpdateDescription()(tr)
-	if !tr.includeUpdateDescription {
+	o := &transportOptions{}
+	WithUpdateDescription()(o)
+	if !o.includeUpdateDescription {
 		t.Error("expected includeUpdateDescription = true")
 	}
 }
 
 func TestWithEmptyUpdates(t *testing.T) {
-	tr := &Transport{}
-	WithEmptyUpdates()(tr)
-	if !tr.emptyUpdates {
+	o := &transportOptions{}
+	WithEmptyUpdates()(o)
+	if !o.emptyUpdates {
 		t.Error("expected emptyUpdates = true")
 	}
 }
 
 func TestWithMaxUpdatedFieldsSize(t *testing.T) {
 	t.Run("positive value sets size and enables update description", func(t *testing.T) {
-		tr := &Transport{}
-		WithMaxUpdatedFieldsSize(1024)(tr)
-		if tr.maxUpdatedFieldsSize != 1024 {
-			t.Errorf("maxUpdatedFieldsSize = %d, want 1024", tr.maxUpdatedFieldsSize)
+		o := &transportOptions{}
+		WithMaxUpdatedFieldsSize(1024)(o)
+		if o.maxUpdatedFieldsSize != 1024 {
+			t.Errorf("maxUpdatedFieldsSize = %d, want 1024", o.maxUpdatedFieldsSize)
 		}
-		if !tr.includeUpdateDescription {
+		if !o.includeUpdateDescription {
 			t.Error("expected includeUpdateDescription = true")
 		}
 	})
 
 	t.Run("zero value enables update description but no size limit", func(t *testing.T) {
-		tr := &Transport{}
-		WithMaxUpdatedFieldsSize(0)(tr)
-		if tr.maxUpdatedFieldsSize != 0 {
-			t.Errorf("maxUpdatedFieldsSize = %d, want 0", tr.maxUpdatedFieldsSize)
+		o := &transportOptions{}
+		WithMaxUpdatedFieldsSize(0)(o)
+		if o.maxUpdatedFieldsSize != 0 {
+			t.Errorf("maxUpdatedFieldsSize = %d, want 0", o.maxUpdatedFieldsSize)
 		}
-		if !tr.includeUpdateDescription {
+		if !o.includeUpdateDescription {
 			t.Error("expected includeUpdateDescription = true")
 		}
 	})
 
 	t.Run("negative value is ignored", func(t *testing.T) {
-		tr := &Transport{}
-		WithMaxUpdatedFieldsSize(-100)(tr)
-		if tr.maxUpdatedFieldsSize != 0 {
-			t.Errorf("maxUpdatedFieldsSize = %d, want 0", tr.maxUpdatedFieldsSize)
+		o := &transportOptions{}
+		WithMaxUpdatedFieldsSize(-100)(o)
+		if o.maxUpdatedFieldsSize != 0 {
+			t.Errorf("maxUpdatedFieldsSize = %d, want 0", o.maxUpdatedFieldsSize)
 		}
-		if !tr.includeUpdateDescription {
+		if !o.includeUpdateDescription {
 			t.Error("expected includeUpdateDescription = true")
 		}
 	})
 }
 
 func TestWithFullDocumentOnly(t *testing.T) {
-	tr := &Transport{}
-	WithFullDocumentOnly()(tr)
-	if !tr.fullDocumentOnly {
+	o := &transportOptions{}
+	WithFullDocumentOnly()(o)
+	if !o.fullDocumentOnly {
 		t.Error("expected fullDocumentOnly = true")
 	}
 }
 
 func TestWithFullDocument(t *testing.T) {
-	tr := &Transport{}
-	WithFullDocument(FullDocumentUpdateLookup)(tr)
-	if tr.fullDocument != FullDocumentUpdateLookup {
-		t.Errorf("fullDocument = %q, want %q", tr.fullDocument, FullDocumentUpdateLookup)
+	o := &transportOptions{}
+	WithFullDocument(FullDocumentUpdateLookup)(o)
+	if o.fullDocument != FullDocumentUpdateLookup {
+		t.Errorf("fullDocument = %q, want %q", o.fullDocument, FullDocumentUpdateLookup)
 	}
 }
 
@@ -806,7 +806,7 @@ func TestResumeTokenKey(t *testing.T) {
 	// be constructed without a live connection, so we test cluster and default.
 	t.Run("cluster level", func(t *testing.T) {
 		tr := &Transport{
-			watchLevel:    WatchLevelCluster,
+			level:    watchLevelCluster,
 			resumeTokenID: "host1",
 		}
 		got := tr.resumeTokenKey()
@@ -818,7 +818,7 @@ func TestResumeTokenKey(t *testing.T) {
 
 	t.Run("unknown watch level uses default namespace", func(t *testing.T) {
 		tr := &Transport{
-			watchLevel:    WatchLevel(99),
+			level:    watchLevel(99),
 			resumeTokenID: "host1",
 		}
 		got := tr.resumeTokenKey()
@@ -843,22 +843,22 @@ func TestStatusConstants(t *testing.T) {
 	}
 }
 
-// --- WatchLevel string tests ---
+// --- watchLevel string tests ---
 
 func TestWatchLevelString(t *testing.T) {
 	tests := []struct {
-		level WatchLevel
+		level watchLevel
 		want  string
 	}{
-		{WatchLevelCollection, "collection"},
-		{WatchLevelDatabase, "database"},
-		{WatchLevelCluster, "cluster"},
-		{WatchLevel(99), "unknown"},
+		{watchLevelCollection, "collection"},
+		{watchLevelDatabase, "database"},
+		{watchLevelCluster, "cluster"},
+		{watchLevel(99), "unknown"},
 	}
 
 	for _, tt := range tests {
 		t.Run(fmt.Sprintf("level_%d", tt.level), func(t *testing.T) {
-			tr := &Transport{watchLevel: tt.level}
+			tr := &Transport{level: tt.level}
 			got := tr.watchLevelString()
 			if got != tt.want {
 				t.Errorf("watchLevelString() = %q, want %q", got, tt.want)
@@ -916,8 +916,7 @@ func TestNewValidationErrors(t *testing.T) {
 	// returns the same errors through option combination tests.
 
 	t.Run("maxUpdatedFieldsSize without fullDocument via options", func(t *testing.T) {
-		tr := &Transport{}
-		WithMaxUpdatedFieldsSize(1024)(tr)
+		tr := &Transport{maxUpdatedFieldsSize: 1024}
 		err := tr.validate()
 		if err != ErrMaxUpdatedFieldsSizeRequiresFull {
 			t.Errorf("validate() = %v, want ErrMaxUpdatedFieldsSizeRequiresFull", err)
@@ -925,8 +924,7 @@ func TestNewValidationErrors(t *testing.T) {
 	})
 
 	t.Run("fullDocumentOnly without fullDocument via options", func(t *testing.T) {
-		tr := &Transport{}
-		WithFullDocumentOnly()(tr)
+		tr := &Transport{fullDocumentOnly: true}
 		err := tr.validate()
 		if err != ErrFullDocumentRequired {
 			t.Errorf("validate() = %v, want ErrFullDocumentRequired", err)
@@ -975,6 +973,9 @@ func TestIsChangeStreamHistoryLost(t *testing.T) {
 		{"ChangeStreamHistoryLost in message", errors.New("ChangeStreamHistoryLost: oplog truncated"), true},
 		{"resume point message", errors.New("resume point may no longer be in the oplog"), true},
 		{"partial match ChangeStreamHistoryLost", errors.New("error code 286 ChangeStreamHistoryLost"), true},
+		{"typed CommandError with code 286", mongo.CommandError{Code: 286, Message: "ChangeStreamHistoryLost"}, true},
+		{"typed CommandError with different code", mongo.CommandError{Code: 100, Message: "some other error"}, false},
+		{"wrapped typed error", fmt.Errorf("watch failed: %w", mongo.CommandError{Code: 286, Message: "ChangeStreamHistoryLost"}), true},
 	}
 
 	for _, tt := range tests {
@@ -991,19 +992,19 @@ func TestIsChangeStreamHistoryLost(t *testing.T) {
 
 func TestWithLogger(t *testing.T) {
 	t.Run("sets logger", func(t *testing.T) {
-		tr := &Transport{}
+		o := &transportOptions{}
 		logger := slog.Default()
-		WithLogger(logger)(tr)
-		if tr.logger != logger {
+		WithLogger(logger)(o)
+		if o.logger != logger {
 			t.Error("expected logger to be set")
 		}
 	})
 
 	t.Run("nil logger is ignored", func(t *testing.T) {
 		existing := slog.Default()
-		tr := &Transport{logger: existing}
-		WithLogger(nil)(tr)
-		if tr.logger != existing {
+		o := &transportOptions{logger: existing}
+		WithLogger(nil)(o)
+		if o.logger != existing {
 			t.Error("expected logger to remain unchanged")
 		}
 	})
@@ -1011,13 +1012,13 @@ func TestWithLogger(t *testing.T) {
 
 func TestWithErrorHandler(t *testing.T) {
 	t.Run("sets handler", func(t *testing.T) {
-		tr := &Transport{}
+		o := &transportOptions{}
 		called := false
-		WithErrorHandler(func(error) { called = true })(tr)
-		if tr.onError == nil {
+		WithErrorHandler(func(error) { called = true })(o)
+		if o.onError == nil {
 			t.Fatal("expected onError to be set")
 		}
-		tr.onError(nil)
+		o.onError(nil)
 		if !called {
 			t.Error("expected handler to be called")
 		}
@@ -1025,9 +1026,9 @@ func TestWithErrorHandler(t *testing.T) {
 
 	t.Run("nil handler is ignored", func(t *testing.T) {
 		existing := func(error) {}
-		tr := &Transport{onError: existing}
-		WithErrorHandler(nil)(tr)
-		if tr.onError == nil {
+		o := &transportOptions{onError: existing}
+		WithErrorHandler(nil)(o)
+		if o.onError == nil {
 			t.Error("expected onError to remain set")
 		}
 	})
@@ -1035,89 +1036,89 @@ func TestWithErrorHandler(t *testing.T) {
 
 func TestWithBufferSize(t *testing.T) {
 	t.Run("positive value", func(t *testing.T) {
-		tr := &Transport{}
-		WithBufferSize(256)(tr)
-		if tr.bufferSize != 256 {
-			t.Errorf("bufferSize = %d, want 256", tr.bufferSize)
+		o := &transportOptions{}
+		WithBufferSize(256)(o)
+		if o.bufferSize != 256 {
+			t.Errorf("bufferSize = %d, want 256", o.bufferSize)
 		}
 	})
 
 	t.Run("zero is ignored", func(t *testing.T) {
-		tr := &Transport{bufferSize: 100}
-		WithBufferSize(0)(tr)
-		if tr.bufferSize != 100 {
-			t.Errorf("bufferSize = %d, want 100 (unchanged)", tr.bufferSize)
+		o := &transportOptions{bufferSize: 100}
+		WithBufferSize(0)(o)
+		if o.bufferSize != 100 {
+			t.Errorf("bufferSize = %d, want 100 (unchanged)", o.bufferSize)
 		}
 	})
 
 	t.Run("negative is ignored", func(t *testing.T) {
-		tr := &Transport{bufferSize: 100}
-		WithBufferSize(-5)(tr)
-		if tr.bufferSize != 100 {
-			t.Errorf("bufferSize = %d, want 100 (unchanged)", tr.bufferSize)
+		o := &transportOptions{bufferSize: 100}
+		WithBufferSize(-5)(o)
+		if o.bufferSize != 100 {
+			t.Errorf("bufferSize = %d, want 100 (unchanged)", o.bufferSize)
 		}
 	})
 }
 
 func TestWithResumeTokenStore(t *testing.T) {
-	tr := &Transport{}
+	o := &transportOptions{}
 	store := &MongoResumeTokenStore{}
-	WithResumeTokenStore(store)(tr)
-	if tr.resumeTokenStore != store {
+	WithResumeTokenStore(store)(o)
+	if o.resumeTokenStore != store {
 		t.Error("expected resumeTokenStore to be set")
 	}
 }
 
 func TestWithoutResume(t *testing.T) {
-	tr := &Transport{}
-	WithoutResume()(tr)
-	if !tr.disableResume {
+	o := &transportOptions{}
+	WithoutResume()(o)
+	if !o.disableResume {
 		t.Error("expected disableResume = true")
 	}
 }
 
 func TestWithResumeTokenID(t *testing.T) {
-	tr := &Transport{}
-	WithResumeTokenID("instance-42")(tr)
-	if tr.resumeTokenID != "instance-42" {
-		t.Errorf("resumeTokenID = %q, want instance-42", tr.resumeTokenID)
+	o := &transportOptions{}
+	WithResumeTokenID("instance-42")(o)
+	if o.resumeTokenID != "instance-42" {
+		t.Errorf("resumeTokenID = %q, want instance-42", o.resumeTokenID)
 	}
 }
 
 func TestWithAckStore(t *testing.T) {
-	tr := &Transport{}
+	o := &transportOptions{}
 	store := &MongoAckStore{}
-	WithAckStore(store)(tr)
-	if tr.ackStore != store {
+	WithAckStore(store)(o)
+	if o.ackStore != store {
 		t.Error("expected ackStore to be set")
 	}
 }
 
 func TestWithPipeline(t *testing.T) {
-	tr := &Transport{}
+	o := &transportOptions{}
 	pipeline := mongo.Pipeline{
 		{{Key: "$match", Value: bson.M{"operationType": "insert"}}},
 	}
-	WithPipeline(pipeline)(tr)
-	if len(tr.pipeline) != 1 {
-		t.Errorf("pipeline len = %d, want 1", len(tr.pipeline))
+	WithPipeline(pipeline)(o)
+	if len(o.pipeline) != 1 {
+		t.Errorf("pipeline len = %d, want 1", len(o.pipeline))
 	}
 }
 
 func TestWithBatchSize(t *testing.T) {
-	tr := &Transport{}
-	WithBatchSize(50)(tr)
-	if tr.batchSize == nil || *tr.batchSize != 50 {
-		t.Errorf("batchSize = %v, want 50", tr.batchSize)
+	o := &transportOptions{}
+	WithBatchSize(50)(o)
+	if o.batchSize == nil || *o.batchSize != 50 {
+		t.Errorf("batchSize = %v, want 50", o.batchSize)
 	}
 }
 
 func TestWithMaxAwaitTime(t *testing.T) {
-	tr := &Transport{}
+	o := &transportOptions{}
 	d := 5 * time.Second
-	WithMaxAwaitTime(d)(tr)
-	if tr.maxAwaitTime == nil || *tr.maxAwaitTime != d {
-		t.Errorf("maxAwaitTime = %v, want %v", tr.maxAwaitTime, d)
+	WithMaxAwaitTime(d)(o)
+	if o.maxAwaitTime == nil || *o.maxAwaitTime != d {
+		t.Errorf("maxAwaitTime = %v, want %v", o.maxAwaitTime, d)
 	}
 }
 
@@ -1228,15 +1229,15 @@ func TestOperationTypeConstants(t *testing.T) {
 	}
 }
 
-// --- WatchLevel constants tests ---
+// --- watchLevel constants tests ---
 
 func TestWatchLevelConstants(t *testing.T) {
 	// Verify values are distinct
-	levels := []WatchLevel{WatchLevelCollection, WatchLevelDatabase, WatchLevelCluster}
-	seen := make(map[WatchLevel]bool)
+	levels := []watchLevel{watchLevelCollection, watchLevelDatabase, watchLevelCluster}
+	seen := make(map[watchLevel]bool)
 	for _, l := range levels {
 		if seen[l] {
-			t.Errorf("duplicate WatchLevel value: %d", l)
+			t.Errorf("duplicate watchLevel value: %d", l)
 		}
 		seen[l] = true
 	}
@@ -1374,14 +1375,14 @@ func TestNewMongoAckStore(t *testing.T) {
 	}
 }
 
-// --- DefaultResumeTokenCollection constant ---
+// --- defaultResumeTokenCollection constant ---
 
-func TestDefaultResumeTokenCollection(t *testing.T) {
-	if DefaultResumeTokenCollection == "" {
-		t.Error("DefaultResumeTokenCollection should not be empty")
+func TestDefaultResumeTokenCollectionValue(t *testing.T) {
+	if defaultResumeTokenCollection == "" {
+		t.Error("defaultResumeTokenCollection should not be empty")
 	}
-	if DefaultResumeTokenCollection != "_event_resume_tokens" {
-		t.Errorf("DefaultResumeTokenCollection = %q, want _event_resume_tokens", DefaultResumeTokenCollection)
+	if defaultResumeTokenCollection != "_event_resume_tokens" {
+		t.Errorf("defaultResumeTokenCollection = %q, want _event_resume_tokens", defaultResumeTokenCollection)
 	}
 }
 
