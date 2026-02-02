@@ -33,6 +33,35 @@ MongoDB Change Stream transport (`github.com/rbaliyan/event-mongodb`) for the ev
 - `MongoResumeTokenStore`: Persists resume tokens for crash recovery
 - `MongoAckStore`: Tracks acknowledged events for at-least-once delivery
 
+**Persistent Store (persistent/)** - Composite transport support:
+- `Store`: Implements `persistent.Store` for durable message storage
+- `CheckpointStore`: Implements `persistent.CheckpointStore` for consumer resume
+- Used with `composite.New(store, signal)` for Redis+MongoDB buffered transport
+
+### Persistent Store Usage
+
+```go
+import (
+    "github.com/rbaliyan/event/v3/transport/composite"
+    "github.com/rbaliyan/event/v3/transport/redis"
+    mongopersistent "github.com/rbaliyan/event-mongodb/persistent"
+)
+
+// MongoDB for durable storage
+store := mongopersistent.NewStore(collection,
+    mongopersistent.WithTTL(7*24*time.Hour),
+    mongopersistent.WithVisibilityTimeout(10*time.Minute),
+)
+
+// Checkpoint store for consumer resume
+checkpointStore := mongopersistent.NewCheckpointStore(checkpointCollection)
+
+// Combine with Redis for low-latency signals
+transport, _ := composite.New(store, redis.New(redisClient),
+    composite.WithCheckpointStore(checkpointStore),
+)
+```
+
 ### Watch Levels
 
 Watch level is determined by the constructor and options (unexported internally):

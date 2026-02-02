@@ -397,6 +397,103 @@ EXAMPLE=idempotency go run ./examples
 EXAMPLE=full go run ./examples
 ```
 
+## Buffered Transport (Redis + MongoDB)
+
+The `persistent` subpackage provides a MongoDB implementation of `persistent.Store` for use with the composite transport. This enables **buffered event delivery** combining:
+- **MongoDB** for durable message storage (at-least-once delivery)
+- **Redis/NATS** for low-latency real-time notifications
+
+### Quick Start
+
+```go
+import (
+    "github.com/rbaliyan/event/v3"
+    "github.com/rbaliyan/event/v3/transport/composite"
+    "github.com/rbaliyan/event/v3/transport/redis"
+    mongopersistent "github.com/rbaliyan/event-mongodb/persistent"
+)
+
+func main() {
+    // MongoDB for durable storage
+    store, err := mongopersistent.NewStore(
+        mongoClient.Database("events").Collection("messages"),
+        mongopersistent.WithTTL(7*24*time.Hour), // Auto-delete acked messages
+    )
+    if err != nil {
+        log.Fatal(err)
+    }
+    store.EnsureIndexes(ctx)
+
+    // Optional: checkpoint store for resume after restart
+    checkpointStore, err := mongopersistent.NewCheckpointStore(
+        mongoClient.Database("events").Collection("checkpoints"),
+    )
+    if err != nil {
+        log.Fatal(err)
+    }
+    checkpointStore.EnsureIndexes(ctx)
+
+    // Redis for real-time signals
+    signal := redis.New(redisClient)
+
+    // Composite transport: durability + low latency
+    transport, _ := composite.New(store, signal,
+        composite.WithCheckpointStore(checkpointStore),
+        composite.WithPollInterval(5*time.Second),
+    )
+
+    // Create bus with the composite transport
+    bus, _ := event.NewBus("orders", event.WithTransport(transport))
+    defer bus.Close(ctx)
+
+    // Use normally - messages are durable!
+    orderEvent := event.New[Order]("order.created")
+    event.Register(ctx, bus, orderEvent)
+    orderEvent.Publish(ctx, order)
+}
+```
+
+### How It Works
+
+```
+Publish:  App -> MongoDB (durable) -> Redis signal (fast notification)
+                     |
+Subscribe: Consumer <- poll MongoDB <- triggered by Redis signal
+```
+
+1. **Publish**: Messages are written to MongoDB first (source of truth), then a lightweight signal is sent via Redis
+2. **Subscribe**: Consumers wait for Redis signals (fast path) or poll MongoDB (fallback)
+3. **Acknowledgment**: Messages are marked "acked" and auto-deleted via TTL
+
+### Message Lifecycle
+
+```
+pending -> inflight -> acked
+    ^          |
+    +---nack---+
+```
+
+- **pending**: Stored and waiting to be processed
+- **inflight**: Fetched and being processed (visibility timeout applies)
+- **acked**: Successfully processed (will be auto-deleted if TTL configured)
+
+### Store Options
+
+```go
+mongopersistent.NewStore(collection,
+    mongopersistent.WithTTL(7*24*time.Hour),           // Auto-delete acked messages
+    mongopersistent.WithVisibilityTimeout(10*time.Minute), // Redelivery timeout
+)
+```
+
+### Monitoring
+
+```go
+stats, _ := store.GetStats(ctx, "orders")
+fmt.Printf("Pending: %d, Inflight: %d, Acked: %d\n",
+    stats.Pending, stats.Inflight, stats.Acked)
+```
+
 ## Limitations
 
 - `Publish()` is not supported - changes are triggered by database writes
