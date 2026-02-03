@@ -346,11 +346,11 @@ func Example_watchLevels() {
 	fmt.Println("Watch levels configured")
 }
 
-// Example_withDistributed demonstrates integration with distributed.MongoClaimer
+// Example_withDistributed demonstrates integration with distributed.MongoStateManager
 // for emulating WorkerPool semantics.
 //
 // MongoDB change streams are Broadcast-only (all subscribers receive all changes).
-// The distributed package provides DistributedWorkerMiddleware that uses atomic database
+// The distributed package provides WorkerPoolMiddleware that uses atomic database
 // claiming to ensure each message is processed by exactly one worker.
 //
 // This is useful for:
@@ -368,9 +368,9 @@ func Example_withDistributed() {
 
 	// Create claimer for worker coordination
 	// Uses MongoDB's atomic findOneAndUpdate for race-condition-free coordination
-	claimer := distributed.NewMongoClaimer(internalDB).
+	claimer := distributed.NewMongoStateManager(internalDB).
 		WithCollection("_order_worker_claims"). // Custom collection name
-		WithCompletionTTL(24 * time.Hour)       // Remember completed messages for 24h
+		WithCompletedTTL(24 * time.Hour)       // Remember completed messages for 24h
 
 	// Create TTL index for automatic cleanup
 	claimer.EnsureIndexes(ctx)
@@ -391,7 +391,7 @@ func Example_withDistributed() {
 	// If a worker holds a message longer than this, it's considered orphaned
 	claimTTL := 5 * time.Minute
 
-	// Subscribe with DistributedWorkerMiddleware
+	// Subscribe with WorkerPoolMiddleware
 	// The middleware handles:
 	// 1. Atomic claiming (only one worker processes each message)
 	// 2. Completion tracking (prevents reprocessing)
@@ -405,12 +405,12 @@ func Example_withDistributed() {
 
 		return nil
 	}, event.WithMiddleware(
-		distributed.DistributedWorkerMiddleware[mongodb.ChangeEvent](claimer, claimTTL),
+		distributed.WorkerPoolMiddleware[mongodb.ChangeEvent](claimer, claimTTL),
 	))
 
 	// Optional: Set up orphan recovery
 	// Detects workers that crashed and releases their claims
-	recoveryRunner := distributed.NewOrphanRecoveryRunner(claimer,
+	recoveryRunner := distributed.NewRecoveryRunner(claimer,
 		distributed.WithStaleTimeout(2*time.Minute),
 		distributed.WithCheckInterval(30*time.Second),
 	)
@@ -512,9 +512,9 @@ func Example_completeSetup() {
 	ackStore.CreateIndexes(ctx)
 
 	// 2. Claimer for WorkerPool emulation
-	claimer := distributed.NewMongoClaimer(internalDB).
+	claimer := distributed.NewMongoStateManager(internalDB).
 		WithCollection("_order_worker_claims").
-		WithCompletionTTL(24 * time.Hour)
+		WithCompletedTTL(24 * time.Hour)
 	claimer.EnsureIndexes(ctx)
 
 	// 3. Idempotency store for deduplication
@@ -560,11 +560,11 @@ func Example_completeSetup() {
 		idempotencyStore.MarkProcessed(ctx, messageID)
 		return nil
 	}, event.WithMiddleware(
-		distributed.DistributedWorkerMiddleware[mongodb.ChangeEvent](claimer, claimTTL),
+		distributed.WorkerPoolMiddleware[mongodb.ChangeEvent](claimer, claimTTL),
 	))
 
 	// 7. Orphan recovery
-	recoveryRunner := distributed.NewOrphanRecoveryRunner(claimer,
+	recoveryRunner := distributed.NewRecoveryRunner(claimer,
 		distributed.WithStaleTimeout(2*time.Minute),
 		distributed.WithCheckInterval(30*time.Second),
 	)

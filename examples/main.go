@@ -2,7 +2,7 @@
 //
 // This example shows:
 //  1. Basic change stream subscription
-//  2. Integration with distributed.MongoClaimer for WorkerPool emulation
+//  2. Integration with distributed.MongoStateManager for WorkerPool emulation
 //  3. Integration with idempotency (in-memory store) for deduplication
 //  4. Complete at-least-once delivery setup
 //
@@ -166,7 +166,7 @@ func runBasicExample() {
 // Example 2: WorkerPool Emulation with Distributed Claimer
 // =============================================================================
 
-// runWorkerPoolExample demonstrates using distributed.MongoClaimer
+// runWorkerPoolExample demonstrates using distributed.MongoStateManager
 // to emulate WorkerPool semantics on the Broadcast-only MongoDB transport.
 //
 // This is useful when:
@@ -198,9 +198,9 @@ func runWorkerPoolExample() {
 	// Create a claimer for worker coordination
 	// The claimer uses MongoDB for atomic claim acquisition,
 	// ensuring only one worker processes each message.
-	claimer := distributed.NewMongoClaimer(internalDB).
+	claimer := distributed.NewMongoStateManager(internalDB).
 		WithCollection("_order_worker_claims"). // Custom collection for this worker group
-		WithCompletionTTL(24 * time.Hour)       // Remember completed messages for 24h
+		WithCompletedTTL(24 * time.Hour)       // Remember completed messages for 24h
 
 	// Create necessary indexes for TTL-based cleanup
 	if err := claimer.EnsureIndexes(ctx); err != nil {
@@ -234,7 +234,7 @@ func runWorkerPoolExample() {
 		instanceID, _ = os.Hostname()
 	}
 
-	// Subscribe with DistributedWorkerMiddleware
+	// Subscribe with WorkerPoolMiddleware
 	// This middleware ensures each message is processed by exactly one worker:
 	// 1. Worker calls Claim() to try to claim the message
 	// 2. If successful, worker processes and marks as completed
@@ -255,7 +255,7 @@ func runWorkerPoolExample() {
 		fmt.Printf("[%s] Completed order %s\n", instanceID, change.DocumentKey)
 		return nil
 	}, event.WithMiddleware(
-		distributed.DistributedWorkerMiddleware[mongodb.ChangeEvent](claimer, claimTTL),
+		distributed.WorkerPoolMiddleware[mongodb.ChangeEvent](claimer, claimTTL),
 	))
 	if err != nil {
 		log.Fatal("Failed to subscribe:", err)
@@ -263,7 +263,7 @@ func runWorkerPoolExample() {
 
 	// Optional: Set up orphan recovery
 	// This detects workers that crashed while processing and releases their claims
-	recoveryRunner := distributed.NewOrphanRecoveryRunner(claimer,
+	recoveryRunner := distributed.NewRecoveryRunner(claimer,
 		distributed.WithStaleTimeout(2*time.Minute),   // Message is orphaned if processing > 2min
 		distributed.WithCheckInterval(30*time.Second), // Check for orphans every 30s
 	)
@@ -430,9 +430,9 @@ func runFullSetupExample() {
 	// -------------------------------------------------------------------------
 	// Step 2: Set up claimer for WorkerPool emulation
 	// -------------------------------------------------------------------------
-	claimer := distributed.NewMongoClaimer(internalDB).
+	claimer := distributed.NewMongoStateManager(internalDB).
 		WithCollection("_order_worker_claims").
-		WithCompletionTTL(24 * time.Hour)
+		WithCompletedTTL(24 * time.Hour)
 	if err := claimer.EnsureIndexes(ctx); err != nil {
 		log.Fatal("Failed to create claim indexes:", err)
 	}
@@ -502,7 +502,7 @@ func runFullSetupExample() {
 	// Create the order processing handler
 	orderHandler := func(ctx context.Context, ev event.Event[mongodb.ChangeEvent], change mongodb.ChangeEvent) error {
 		// Additional idempotency check (belt-and-suspenders approach)
-		// The DistributedWorkerMiddleware handles claiming, but this catches
+		// The WorkerPoolMiddleware handles claiming, but this catches
 		// cases where the same message is delivered to the same worker twice
 		messageID := change.ID
 		isDuplicate, err := idempotencyStore.IsDuplicate(ctx, messageID)
@@ -539,10 +539,10 @@ func runFullSetupExample() {
 		return nil
 	}
 
-	// Subscribe with DistributedWorkerMiddleware for load balancing
+	// Subscribe with WorkerPoolMiddleware for load balancing
 	err = orderChanges.Subscribe(ctx, orderHandler,
 		event.WithMiddleware(
-			distributed.DistributedWorkerMiddleware[mongodb.ChangeEvent](claimer, claimTTL),
+			distributed.WorkerPoolMiddleware[mongodb.ChangeEvent](claimer, claimTTL),
 		),
 	)
 	if err != nil {
@@ -552,7 +552,7 @@ func runFullSetupExample() {
 	// -------------------------------------------------------------------------
 	// Step 7: Start orphan recovery
 	// -------------------------------------------------------------------------
-	recoveryRunner := distributed.NewOrphanRecoveryRunner(claimer,
+	recoveryRunner := distributed.NewRecoveryRunner(claimer,
 		distributed.WithStaleTimeout(2*time.Minute),
 		distributed.WithCheckInterval(30*time.Second),
 		distributed.WithBatchLimit(100),
