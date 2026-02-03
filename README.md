@@ -18,6 +18,7 @@ go get github.com/rbaliyan/event-mongodb
 - Flexible payload options (full ChangeEvent or document only)
 - Update description metadata (updated/removed fields) via context
 - Empty update filtering and updated fields size limits
+- OpenTelemetry metrics with subscriber middleware (oplog lag, handler duration, throughput, pending gauge)
 
 ## Usage
 
@@ -190,6 +191,44 @@ transport, _ := mongodb.New(db,
     mongodb.WithPipeline(pipeline),
 )
 ```
+
+### Metrics & Monitoring
+
+Track change stream processing with OpenTelemetry metrics:
+
+```go
+// Create metrics (uses global OTel provider by default)
+metrics, err := mongodb.NewMetrics()
+
+// Or with a custom provider and namespace
+metrics, err := mongodb.NewMetrics(
+    mongodb.WithMeterProvider(myProvider),
+    mongodb.WithMetricsNamespace("orders"),
+)
+defer metrics.Close()
+
+// Wire pending gauge to your ack store
+metrics.SetPendingCallback(func() int64 {
+    count, _ := db.Collection("_event_acks").CountDocuments(ctx,
+        bson.M{"acked_at": bson.M{"$eq": time.Time{}}})
+    return count
+})
+
+// Use as subscriber middleware
+orderEvent.Subscribe(ctx, handler,
+    event.WithMiddleware(mongodb.MetricsMiddleware[mongodb.ChangeEvent](metrics)),
+)
+```
+
+Available metrics:
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `mongodb_changes_processed_total` | Counter | Events processed successfully (by event, operation, namespace) |
+| `mongodb_changes_failed_total` | Counter | Handler errors (by event, operation, namespace) |
+| `mongodb_oplog_lag_seconds` | Histogram | Delay from MongoDB clusterTime to handler execution |
+| `mongodb_handler_duration_seconds` | Histogram | Handler processing time |
+| `mongodb_changes_pending` | Gauge | Pending unacked events (callback-based) |
 
 ## Integration with distributed package
 

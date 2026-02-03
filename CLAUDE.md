@@ -33,6 +33,17 @@ MongoDB Change Stream transport (`github.com/rbaliyan/event-mongodb`) for the ev
 - `MongoResumeTokenStore`: Persists resume tokens for crash recovery
 - `MongoAckStore`: Tracks acknowledged events for at-least-once delivery
 
+**Metrics (metrics.go)** - OpenTelemetry metrics and subscriber middleware:
+- `Metrics` struct with nil-safe methods
+- `NewMetrics(opts...)` constructor with `WithMeterProvider()` and `WithMetricsNamespace()` options
+- `MetricsMiddleware[T](*Metrics)` generic subscriber middleware
+- Counters: `mongodb_changes_processed_total`, `mongodb_changes_failed_total`
+- Histograms: `mongodb_oplog_lag_seconds`, `mongodb_handler_duration_seconds`
+- Observable gauge: `mongodb_changes_pending` (callback-based via `SetPendingCallback`)
+- Middleware extracts `cluster_time` from context metadata to compute oplog lag
+- Uses `event.ClassifyError()` for proper error classification (ErrAck = processed, all others = failed)
+- `Close()` unregisters gauge callbacks
+
 **Persistent Store (persistent/)** - Composite transport support:
 - `Store`: Implements `persistent.Store` for durable message storage
 - `CheckpointStore`: Implements `persistent.CheckpointStore` for consumer resume
@@ -196,10 +207,14 @@ atomic.LoadInt32(&t.status) == 1             // IsOpen
 
 - `github.com/rbaliyan/event/v3` - Transport interface and utilities
 - `go.mongodb.org/mongo-driver` - MongoDB driver
+- `go.opentelemetry.io/otel` - OpenTelemetry API (metrics)
+- `go.opentelemetry.io/otel/metric` - OpenTelemetry metric instruments
+- `go.opentelemetry.io/otel/sdk/metric` - OpenTelemetry SDK (test only)
 
 ## Testing
 
-Tests require a MongoDB replica set. Run with:
+Metrics tests use `sdkmetric.NewManualReader()` for deterministic reads — no external services needed.
+Integration tests (transport, stores) require a MongoDB replica set. Run with:
 
 ```bash
 go test -v ./...
