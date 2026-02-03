@@ -3,7 +3,7 @@ module github.com/rbaliyan/event-mongodb
 go 1.24.0
 
 require (
-	github.com/rbaliyan/event/v3 v3.6.7
+	github.com/rbaliyan/event/v3 v3.6.14
 	go.mongodb.org/mongo-driver v1.17.6
 )
 
