@@ -44,6 +44,12 @@ MongoDB Change Stream transport (`github.com/rbaliyan/event-mongodb`) for the ev
 - Uses `event.ClassifyError()` for proper error classification (ErrAck = processed, all others = failed)
 - `Close()` unregisters gauge callbacks
 
+**Observability Stack** - Three-layer event lifecycle observability:
+- Monitor middleware (`event/v3/monitor`): per-event lifecycle tracking (pending/completed/failed/retrying)
+- Metrics middleware (`MetricsMiddleware`): aggregate throughput, latency, error rates via OpenTelemetry
+- DLQ (`event-dlq`): capture permanently failed events for replay
+- `AckQueryStore` interface extends `AckStore` with `List`/`Count` for monitoring pending events
+
 **Persistent Store (persistent/)** - Composite transport support:
 - `Store`: Implements `persistent.Store` for durable message storage
 - `CheckpointStore`: Implements `persistent.CheckpointStore` for consumer resume

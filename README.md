@@ -230,6 +230,82 @@ Available metrics:
 | `mongodb_handler_duration_seconds` | Histogram | Handler processing time |
 | `mongodb_changes_pending` | Gauge | Pending unacked events (callback-based) |
 
+### Event Lifecycle Observability
+
+For production change stream processing, combine three complementary layers to achieve full event lifecycle observability:
+
+| Layer | Purpose | Granularity |
+|-------|---------|-------------|
+| **Monitor middleware** | Per-event lifecycle tracking (pending → completed/failed/retrying) | Individual events |
+| **Metrics middleware** | Aggregate throughput, latency, error rates | Counters & histograms |
+| **DLQ** | Capture permanently failed events for replay | Failed events only |
+
+```
+Change Stream → AckStore (pending) → Monitor (tracks status) → DLQ (if rejected)
+                                           ↓
+                                   Metrics (aggregates)
+                                           ↓
+                                   AckStore (acked)
+```
+
+**Recommended subscribe call combining all three:**
+
+```go
+import (
+    mongodb "github.com/rbaliyan/event-mongodb"
+    "github.com/rbaliyan/event/v3"
+    "github.com/rbaliyan/event/v3/monitor"
+)
+
+// Setup observability stores
+monitorStore := monitor.NewMongoStore(internalDB)
+metrics, _ := mongodb.NewMetrics()
+dlqManager := dlq.NewManager(dlqStore, transport)
+
+// Subscribe with full observability stack
+orderChanges.Subscribe(ctx, handler,
+    event.WithMiddleware(
+        monitor.Middleware[mongodb.ChangeEvent](monitorStore),  // per-event lifecycle
+        mongodb.MetricsMiddleware[mongodb.ChangeEvent](metrics), // aggregate metrics
+    ),
+)
+```
+
+**Querying a specific event's status across all layers:**
+
+```go
+// 1. Monitor: check per-event lifecycle status
+entries, _ := monitorStore.GetByEventID(ctx, eventID)
+fmt.Printf("Status: %s, Duration: %v\n", entries[0].Status, entries[0].Duration)
+
+// 2. DLQ: check if the event was sent to dead-letter queue
+dlqMsg, err := dlqStore.GetByOriginalID(ctx, eventID)
+if err == nil {
+    fmt.Printf("DLQ: error=%s, retries=%d\n", dlqMsg.Error, dlqMsg.RetryCount)
+}
+
+// 3. AckStore: check if the event is still pending acknowledgment
+pending, _ := ackStore.IsPending(ctx, eventID)
+fmt.Printf("Pending ack: %v\n", pending)
+
+// 4. AckStore: list all pending events for monitoring dashboards
+if qs, ok := ackStore.(mongodb.AckQueryStore); ok {
+    entries, _ := qs.List(ctx, mongodb.AckFilter{
+        Status: mongodb.AckStatusPending,
+        Limit:  50,
+    })
+    fmt.Printf("Pending events: %d\n", len(entries))
+}
+```
+
+**Expose the monitor via HTTP for operational dashboards:**
+
+```go
+import monitorhttp "github.com/rbaliyan/event/v3/monitor/http"
+
+mux.Handle("/v1/monitor/", monitorhttp.NewHandler(monitorStore))
+```
+
 ## Integration with distributed package
 
 MongoDB change streams are Broadcast-only (all subscribers receive all changes). The [distributed](https://github.com/rbaliyan/event/tree/main/distributed) package provides `DistributedWorkerMiddleware` that uses atomic database claiming to emulate WorkerPool semantics.

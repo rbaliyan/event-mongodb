@@ -155,8 +155,84 @@ func (s *MongoAckStore) CreateIndexes(ctx context.Context) error {
 	return err
 }
 
+// List returns ack entries matching the filter.
+func (s *MongoAckStore) List(ctx context.Context, filter AckFilter) ([]AckEntry, error) {
+	mongoFilter := buildAckFilter(filter)
+
+	limit := filter.Limit
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+
+	opts := options.Find().
+		SetSort(bson.D{{Key: "created_at", Value: -1}}).
+		SetLimit(int64(limit))
+	if filter.Offset > 0 {
+		opts.SetSkip(int64(filter.Offset))
+	}
+
+	cursor, err := s.collection.Find(ctx, mongoFilter, opts)
+	if err != nil {
+		return nil, err
+	}
+	defer cursor.Close(ctx)
+
+	var entries []AckEntry
+	for cursor.Next(ctx) {
+		var doc ackDoc
+		if err := cursor.Decode(&doc); err != nil {
+			return nil, err
+		}
+		entries = append(entries, AckEntry{
+			EventID:   doc.ID,
+			CreatedAt: doc.CreatedAt,
+			AckedAt:   doc.AckedAt,
+		})
+	}
+
+	return entries, cursor.Err()
+}
+
+// Count returns the number of entries matching the filter.
+func (s *MongoAckStore) Count(ctx context.Context, filter AckFilter) (int64, error) {
+	mongoFilter := buildAckFilter(filter)
+	return s.collection.CountDocuments(ctx, mongoFilter)
+}
+
+// buildAckFilter creates a MongoDB filter from AckFilter.
+func buildAckFilter(filter AckFilter) bson.M {
+	f := bson.M{}
+
+	switch filter.Status {
+	case AckStatusPending:
+		f["acked_at"] = bson.M{"$eq": time.Time{}}
+	case AckStatusAcked:
+		f["acked_at"] = bson.M{"$gt": time.Time{}}
+	}
+
+	if !filter.StartTime.IsZero() {
+		if f["created_at"] == nil {
+			f["created_at"] = bson.M{}
+		}
+		f["created_at"].(bson.M)["$gte"] = filter.StartTime
+	}
+
+	if !filter.EndTime.IsZero() {
+		if f["created_at"] == nil {
+			f["created_at"] = bson.M{}
+		}
+		f["created_at"].(bson.M)["$lt"] = filter.EndTime
+	}
+
+	return f
+}
+
 // Compile-time checks
 var (
 	_ ResumeTokenStore = (*MongoResumeTokenStore)(nil)
 	_ AckStore         = (*MongoAckStore)(nil)
+	_ AckQueryStore    = (*MongoAckStore)(nil)
 )
