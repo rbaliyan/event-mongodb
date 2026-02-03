@@ -232,78 +232,190 @@ Available metrics:
 
 ### Event Lifecycle Observability
 
-For production change stream processing, combine three complementary layers to achieve full event lifecycle observability:
+For production change stream processing, combine four complementary layers to achieve full event lifecycle observability:
 
-| Layer | Purpose | Granularity |
-|-------|---------|-------------|
-| **Monitor middleware** | Per-event lifecycle tracking (pending → completed/failed/retrying) | Individual events |
-| **Metrics middleware** | Aggregate throughput, latency, error rates | Counters & histograms |
-| **DLQ** | Capture permanently failed events for replay | Failed events only |
+| Layer | Purpose | Answers |
+|-------|---------|---------|
+| **Monitor middleware** | Per-event lifecycle tracking | What happened to event X? Which events are failing? |
+| **Metrics middleware** | Aggregate throughput and latency | What's our throughput? How far behind are we? |
+| **AckStore** | Delivery guarantee tracking | Is event X still in-flight? How many events are stuck? |
+| **DLQ** | Permanently failed event capture | Did event X get rejected? What errors are recurring? |
 
 ```
-Change Stream → AckStore (pending) → Monitor (tracks status) → DLQ (if rejected)
-                                           ↓
-                                   Metrics (aggregates)
-                                           ↓
-                                   AckStore (acked)
+Change Stream
+    │
+    ▼
+AckStore.Store(pending)
+    │
+    ▼
+Monitor middleware ──► pending → completed
+    │                         → failed
+    │                         → retrying
+    ▼
+Metrics middleware ──► counters, histograms, oplog lag
+    │
+    ▼
+Handler
+    │
+    ├── success ──► AckStore.Ack()
+    │
+    └── failure ──► retries exhausted? ──► DLQ.Store()
 ```
 
-**Recommended subscribe call combining all three:**
+#### Full Setup
 
 ```go
 import (
     mongodb "github.com/rbaliyan/event-mongodb"
+    "github.com/rbaliyan/event-dlq"
     "github.com/rbaliyan/event/v3"
     "github.com/rbaliyan/event/v3/monitor"
+    "github.com/rbaliyan/event/v3/transport/message"
+    monitorhttp "github.com/rbaliyan/event/v3/monitor/http"
 )
 
-// Setup observability stores
+// ── 1. Storage layer ──────────────────────────────────
+
+// Monitor: per-event lifecycle (pending/completed/failed/retrying)
 monitorStore := monitor.NewMongoStore(internalDB)
-metrics, _ := mongodb.NewMetrics()
+
+// AckStore: delivery guarantee tracking
+ackStore := mongodb.NewMongoAckStore(
+    internalDB.Collection("_event_acks"),
+    24*time.Hour,
+)
+ackStore.CreateIndexes(ctx)
+
+// DLQ: permanently failed events
+dlqStore := dlq.NewMongoStore(internalDB)
+dlqStore.EnsureIndexes(ctx)
 dlqManager := dlq.NewManager(dlqStore, transport)
 
-// Subscribe with full observability stack
-orderChanges.Subscribe(ctx, handler,
+// Metrics: aggregate counters and histograms
+metrics, _ := mongodb.NewMetrics(
+    mongodb.WithMetricsNamespace("orders"),
+)
+defer metrics.Close()
+
+// Wire pending gauge to ack store
+metrics.SetPendingCallback(func() int64 {
+    if qs, ok := any(ackStore).(mongodb.AckQueryStore); ok {
+        count, _ := qs.Count(ctx, mongodb.AckFilter{
+            Status: mongodb.AckStatusPending,
+        })
+        return count
+    }
+    return 0
+})
+
+// ── 2. Transport with ack tracking ────────────────────
+
+transport, _ := mongodb.New(db,
+    mongodb.WithCollection("orders"),
+    mongodb.WithFullDocument(mongodb.FullDocumentUpdateLookup),
+    mongodb.WithAckStore(ackStore),
+)
+
+bus, _ := event.NewBus("orders", event.WithTransport(transport))
+defer bus.Close(ctx)
+
+// ── 3. Event with DLQ hook ────────────────────────────
+
+orderChanges := event.New[mongodb.ChangeEvent]("order.changes",
+    event.WithMaxRetries(3),
+    event.WithDeadLetterQueue(func(ctx context.Context, msg message.Message, err error) error {
+        return dlqManager.Store(ctx,
+            "order.changes",
+            msg.ID(),
+            msg.Payload(),
+            msg.Metadata(),
+            err,
+            msg.RetryCount(),
+            "order-service",
+        )
+    }),
+)
+event.Register(ctx, bus, orderChanges)
+
+// ── 4. Subscribe with middleware stack ─────────────────
+
+orderChanges.Subscribe(ctx, handleOrder,
     event.WithMiddleware(
-        monitor.Middleware[mongodb.ChangeEvent](monitorStore),  // per-event lifecycle
-        mongodb.MetricsMiddleware[mongodb.ChangeEvent](metrics), // aggregate metrics
+        monitor.Middleware[mongodb.ChangeEvent](monitorStore),
+        mongodb.MetricsMiddleware[mongodb.ChangeEvent](metrics),
     ),
 )
+
+// ── 5. HTTP API for dashboards ────────────────────────
+
+mux := http.NewServeMux()
+mux.Handle("/v1/monitor/", monitorhttp.New(monitorStore))
+go http.ListenAndServe(":8081", mux)
+
+// ── 6. Background maintenance ─────────────────────────
+
+go func() {
+    ticker := time.NewTicker(1 * time.Hour)
+    for range ticker.C {
+        monitorStore.DeleteOlderThan(ctx, 7*24*time.Hour)
+        dlqManager.Cleanup(ctx, 30*24*time.Hour)
+    }
+}()
 ```
 
-**Querying a specific event's status across all layers:**
+#### Diagnosing a Specific Event
+
+Query across all four layers to get the complete picture for any event:
 
 ```go
-// 1. Monitor: check per-event lifecycle status
-entries, _ := monitorStore.GetByEventID(ctx, eventID)
-fmt.Printf("Status: %s, Duration: %v\n", entries[0].Status, entries[0].Duration)
+func diagnoseEvent(ctx context.Context, eventID string) {
+    // 1. Monitor: lifecycle status with timing and trace IDs
+    entries, _ := monitorStore.GetByEventID(ctx, eventID)
+    for _, e := range entries {
+        fmt.Printf("  subscriber=%s status=%s duration=%v trace=%s\n",
+            e.SubscriptionID, e.Status, e.Duration, e.TraceID)
+    }
 
-// 2. DLQ: check if the event was sent to dead-letter queue
-dlqMsg, err := dlqStore.GetByOriginalID(ctx, eventID)
-if err == nil {
-    fmt.Printf("DLQ: error=%s, retries=%d\n", dlqMsg.Error, dlqMsg.RetryCount)
-}
+    // 2. AckStore: is it still pending delivery?
+    pending, _ := ackStore.IsPending(ctx, eventID)
+    fmt.Printf("  pending_ack=%v\n", pending)
 
-// 3. AckStore: check if the event is still pending acknowledgment
-pending, _ := ackStore.IsPending(ctx, eventID)
-fmt.Printf("Pending ack: %v\n", pending)
+    // 3. DLQ: did it get rejected after exhausting retries?
+    dlqMsg, err := dlqStore.GetByOriginalID(ctx, eventID)
+    if err == nil {
+        fmt.Printf("  DLQ: error=%s retries=%d created=%v\n",
+            dlqMsg.Error, dlqMsg.RetryCount, dlqMsg.CreatedAt)
+    }
 
-// 4. AckStore: list all pending events for monitoring dashboards
-if qs, ok := ackStore.(mongodb.AckQueryStore); ok {
-    entries, _ := qs.List(ctx, mongodb.AckFilter{
-        Status: mongodb.AckStatusPending,
-        Limit:  50,
-    })
-    fmt.Printf("Pending events: %d\n", len(entries))
+    // 4. AckStore: list all pending events for dashboards
+    if qs, ok := any(ackStore).(mongodb.AckQueryStore); ok {
+        pending, _ := qs.Count(ctx, mongodb.AckFilter{
+            Status: mongodb.AckStatusPending,
+        })
+        fmt.Printf("  total_pending=%d\n", pending)
+    }
 }
 ```
 
-**Expose the monitor via HTTP for operational dashboards:**
+#### Monitor HTTP API
 
-```go
-import monitorhttp "github.com/rbaliyan/event/v3/monitor/http"
+The monitor exposes a REST API for operational dashboards:
 
-mux.Handle("/v1/monitor/", monitorhttp.NewHandler(monitorStore))
+```bash
+# Failed events in the last hour
+GET /v1/monitor/entries?status=failed&start_time=2025-01-15T09:00:00Z&order_desc=true
+
+# Events stuck in retry loop
+GET /v1/monitor/entries?status=retrying&min_retries=3
+
+# Slow handlers (> 5s)
+GET /v1/monitor/entries?min_duration=5s&order_desc=true
+
+# Count pending by bus
+GET /v1/monitor/entries/count?status=pending&bus_id=orders
+
+# Full lifecycle for a specific event
+GET /v1/monitor/entries/{eventID}
 ```
 
 ## Integration with distributed package
