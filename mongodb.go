@@ -67,10 +67,9 @@ import (
 	"github.com/rbaliyan/event/v3/transport"
 	"github.com/rbaliyan/event/v3/transport/base"
 	"github.com/rbaliyan/event/v3/transport/channel"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
 // Errors returned by the MongoDB transport.
@@ -1454,7 +1453,7 @@ func extractUpdateDescription(raw bson.M, event *ChangeEvent) {
 // extractTimestamp populates the event timestamp from the raw change event's
 // "clusterTime" field.
 func extractTimestamp(raw bson.M, event *ChangeEvent) {
-	if ts, ok := raw["clusterTime"].(primitive.Timestamp); ok {
+	if ts, ok := raw["clusterTime"].(bson.Timestamp); ok {
 		event.Timestamp = time.Unix(int64(ts.T), 0)
 	}
 }
@@ -1465,11 +1464,11 @@ func formatDocumentKey(id any) string {
 		return ""
 	}
 	switch v := id.(type) {
-	case primitive.ObjectID:
+	case bson.ObjectID:
 		return v.Hex()
 	case string:
 		return v
-	case primitive.Binary:
+	case bson.Binary:
 		// UUID or other binary types
 		return fmt.Sprintf("%x", v.Data)
 	case int, int32, int64:
@@ -1494,7 +1493,7 @@ func bsonToJSON(doc bson.M) (json.RawMessage, error) {
 
 // convertBSONTypes recursively converts BSON-specific types to JSON-friendly types.
 // Uses MongoDB Extended JSON format for special types so they can be unmarshaled
-// back into their original Go types (e.g., primitive.ObjectID).
+// back into their original Go types (e.g., bson.ObjectID).
 func convertBSONTypes(v any) any {
 	switch val := v.(type) {
 	case bson.M:
@@ -1509,18 +1508,18 @@ func convertBSONTypes(v any) any {
 			result[i] = convertBSONTypes(v)
 		}
 		return result
-	case primitive.ObjectID:
-		// Use Extended JSON format so primitive.ObjectID can unmarshal it
+	case bson.ObjectID:
+		// Use Extended JSON format so bson.ObjectID can unmarshal it
 		return map[string]string{"$oid": val.Hex()}
-	case primitive.DateTime:
+	case bson.DateTime:
 		// Use ISO string format - compatible with Go's time.Time JSON unmarshal
 		return time.Unix(int64(val)/1000, (int64(val)%1000)*1000000).Format(time.RFC3339Nano)
-	case primitive.Timestamp:
+	case bson.Timestamp:
 		// Use ISO string format for timestamps too
 		return time.Unix(int64(val.T), 0).Format(time.RFC3339Nano)
-	case primitive.Binary:
+	case bson.Binary:
 		return map[string]any{"$binary": map[string]any{"base64": val.Data, "subType": fmt.Sprintf("%02x", val.Subtype)}}
-	case primitive.Decimal128:
+	case bson.Decimal128:
 		return val.String()
 	default:
 		return val

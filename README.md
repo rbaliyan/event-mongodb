@@ -62,6 +62,75 @@ t, _ := mongodb.New(db)
 t, _ := mongodb.NewClusterWatch(client)
 ```
 
+### Bus Architecture: One Bus per Collection
+
+The MongoDB transport fans out **every change to every registered event** on the bus with no per-event routing. This means architecture choice matters.
+
+**Use one transport and one bus per collection** (recommended):
+
+```go
+// Orders: own transport → own bus → own events
+ordersTransport, _ := mongodb.New(db,
+    mongodb.WithCollection("orders"),
+    mongodb.WithFullDocument(mongodb.FullDocumentUpdateLookup),
+    mongodb.WithAckStore(ordersAckStore),
+)
+ordersBus, _ := event.NewBus("orders", event.WithTransport(ordersTransport))
+
+// Customers: own transport → own bus → own events
+customersTransport, _ := mongodb.New(db,
+    mongodb.WithCollection("customers"),
+    mongodb.WithFullDocument(mongodb.FullDocumentUpdateLookup),
+    mongodb.WithAckStore(customersAckStore),
+)
+customersBus, _ := event.NewBus("customers", event.WithTransport(customersTransport))
+```
+
+**Why one bus per collection:**
+
+- **No wasted work.** A database-level transport delivers every change from every collection to every registered event. Subscribers discard irrelevant changes.
+- **Codec decode safety.** The event bus decodes payloads before the handler runs. With `event.New[Order]("orders")` and `event.New[Customer]("customers")` on the same bus, a customer change decoded as `Order` will fail. If DLQ is enabled, these decode failures are sent to the dead-letter queue — flooding it with false positives and preventing handler-level collection routing.
+- **Independent resume tokens.** Each transport tracks its own resume position. If orders processing falls behind, customers are unaffected.
+- **Independent ack stores.** Pending event counts are per-collection, making monitoring meaningful.
+- **Independent DLQ, metrics, and middleware.** Different retry policies, metrics namespaces, and claim TTLs per collection.
+
+**When a single database-level bus is appropriate:**
+
+A single bus watching all collections makes sense only when a single handler processes changes from all collections uniformly — for example, an audit log, CDC replication sink, or a router using `mongodb.ChangeEvent` (not a typed struct):
+
+```go
+// Database-level watch — single handler for all collections
+transport, _ := mongodb.New(db) // No WithCollection = all collections
+bus, _ := event.NewBus("all-changes", event.WithTransport(transport))
+
+allChanges := event.New[mongodb.ChangeEvent]("db.changes")
+event.Register(ctx, bus, allChanges)
+
+allChanges.Subscribe(ctx, func(ctx context.Context, ev event.Event[mongodb.ChangeEvent], change mongodb.ChangeEvent) error {
+    // Route by collection — works because ChangeEvent is the wire type
+    switch change.Collection {
+    case "orders":
+        return handleOrder(ctx, change)
+    case "customers":
+        return handleCustomer(ctx, change)
+    default:
+        return nil
+    }
+})
+```
+
+This pattern only works with `event.New[mongodb.ChangeEvent]` because every change decodes successfully into `ChangeEvent`. Using typed structs like `event.New[Order]` on a database-level bus will cause decode failures for non-order collections.
+
+**Avoid multiple events on one MongoDB bus:**
+
+```go
+// BAD: both events receive ALL changes, decode failures flood DLQ
+orderEvent := event.New[Order]("order.changes")
+customerEvent := event.New[Customer]("customer.changes")
+event.Register(ctx, bus, orderEvent)    // customer changes → decode error → DLQ
+event.Register(ctx, bus, customerEvent) // order changes → decode error → DLQ
+```
+
 ### Resume Tokens
 
 Resume tokens are automatically persisted to enable reliable resumption:

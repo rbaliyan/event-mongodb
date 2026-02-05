@@ -7,10 +7,9 @@ import (
 	"time"
 
 	"github.com/rbaliyan/event/v3/transport/persistent"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
 // Errors returned by the store.
@@ -39,7 +38,7 @@ const (
 
 // storedMessage represents the MongoDB document structure for messages.
 type storedMessage struct {
-	ID         primitive.ObjectID `bson:"_id"`
+	ID         bson.ObjectID `bson:"_id"`
 	EventName  string             `bson:"event_name"`
 	Data       []byte             `bson:"data"`
 	Status     string             `bson:"status"`
@@ -130,7 +129,7 @@ func NewStore(collection *mongo.Collection, opts ...StoreOption) (*Store, error)
 // Append adds a message to the store for the given event.
 // Returns a unique sequence ID (MongoDB ObjectID hex string) for the stored message.
 func (s *Store) Append(ctx context.Context, eventName string, data []byte) (string, error) {
-	id := primitive.NewObjectID()
+	id := bson.NewObjectID()
 	doc := storedMessage{
 		ID:        id,
 		EventName: eventName,
@@ -175,7 +174,7 @@ func (s *Store) Fetch(ctx context.Context, eventName string, checkpoint string) 
 
 	// Apply checkpoint filter if provided
 	if checkpoint != "" {
-		oid, err := primitive.ObjectIDFromHex(checkpoint)
+		oid, err := bson.ObjectIDFromHex(checkpoint)
 		if err != nil {
 			return nil, fmt.Errorf("invalid checkpoint: %w", err)
 		}
@@ -215,7 +214,7 @@ func (s *Store) Fetch(ctx context.Context, eventName string, checkpoint string) 
 // The message is marked as "acked" and will be automatically deleted
 // after the TTL (if configured).
 func (s *Store) Ack(ctx context.Context, eventName string, sequenceID string) error {
-	oid, err := primitive.ObjectIDFromHex(sequenceID)
+	oid, err := bson.ObjectIDFromHex(sequenceID)
 	if err != nil {
 		return fmt.Errorf("%w: %s", ErrInvalidSequenceID, err)
 	}
@@ -240,7 +239,7 @@ func (s *Store) Ack(ctx context.Context, eventName string, sequenceID string) er
 // Nack marks a message for redelivery (processing failed).
 // The message is returned to "pending" status and its retry count is incremented.
 func (s *Store) Nack(ctx context.Context, eventName string, sequenceID string) error {
-	oid, err := primitive.ObjectIDFromHex(sequenceID)
+	oid, err := bson.ObjectIDFromHex(sequenceID)
 	if err != nil {
 		return fmt.Errorf("%w: %s", ErrInvalidSequenceID, err)
 	}

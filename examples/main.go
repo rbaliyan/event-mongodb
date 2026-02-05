@@ -25,15 +25,14 @@ import (
 	"github.com/rbaliyan/event/v3"
 	"github.com/rbaliyan/event/v3/distributed"
 	"github.com/rbaliyan/event/v3/idempotency"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
 // Order represents an order document in the orders collection.
 type Order struct {
-	ID         primitive.ObjectID `bson:"_id,omitempty" json:"id"`
+	ID         bson.ObjectID `bson:"_id,omitempty" json:"id"`
 	CustomerID string             `bson:"customer_id" json:"customer_id"`
 	Product    string             `bson:"product" json:"product"`
 	Amount     float64            `bson:"amount" json:"amount"`
@@ -85,7 +84,7 @@ func runBasicExample() {
 	}()
 
 	// Connect to MongoDB
-	client, err := mongo.Connect(ctx, options.Client().ApplyURI("mongodb://localhost:27017"))
+	client, err := mongo.Connect(options.Client().ApplyURI("mongodb://localhost:27017"))
 	if err != nil {
 		log.Fatal("Failed to connect:", err)
 	}
@@ -186,7 +185,7 @@ func runWorkerPoolExample() {
 	}()
 
 	// Connect to MongoDB
-	client, err := mongo.Connect(ctx, options.Client().ApplyURI("mongodb://localhost:27017"))
+	client, err := mongo.Connect(options.Client().ApplyURI("mongodb://localhost:27017"))
 	if err != nil {
 		log.Fatal("Failed to connect:", err)
 	}
@@ -303,7 +302,7 @@ func runIdempotencyExample() {
 	}()
 
 	// Connect to MongoDB
-	client, err := mongo.Connect(ctx, options.Client().ApplyURI("mongodb://localhost:27017"))
+	client, err := mongo.Connect(options.Client().ApplyURI("mongodb://localhost:27017"))
 	if err != nil {
 		log.Fatal("Failed to connect:", err)
 	}
@@ -405,7 +404,7 @@ func runFullSetupExample() {
 	}()
 
 	// Connect to MongoDB
-	client, err := mongo.Connect(ctx, options.Client().ApplyURI("mongodb://localhost:27017"))
+	client, err := mongo.Connect(options.Client().ApplyURI("mongodb://localhost:27017"))
 	if err != nil {
 		log.Fatal("Failed to connect:", err)
 	}

@@ -9,15 +9,14 @@ import (
 	"github.com/rbaliyan/event/v3"
 	"github.com/rbaliyan/event/v3/distributed"
 	"github.com/rbaliyan/event/v3/idempotency"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
 // Order represents an order document.
 type Order struct {
-	ID         primitive.ObjectID `bson:"_id,omitempty" json:"id"`
+	ID         bson.ObjectID `bson:"_id,omitempty" json:"id"`
 	CustomerID string             `bson:"customer_id" json:"customer_id"`
 	Product    string             `bson:"product" json:"product"`
 	Amount     float64            `bson:"amount" json:"amount"`
@@ -37,7 +36,7 @@ func Example() {
 	ctx := context.Background()
 
 	// Connect to MongoDB (requires a replica set)
-	client, err := mongo.Connect(ctx, options.Client().ApplyURI("mongodb://localhost:27017"))
+	client, err := mongo.Connect(options.Client().ApplyURI("mongodb://localhost:27017"))
 	if err != nil {
 		fmt.Println("Connect error:", err)
 		return
@@ -98,7 +97,7 @@ func Example() {
 func Example_basic() {
 	ctx := context.Background()
 
-	client, _ := mongo.Connect(ctx, options.Client().ApplyURI("mongodb://localhost:27017"))
+	client, _ := mongo.Connect(options.Client().ApplyURI("mongodb://localhost:27017"))
 	defer client.Disconnect(ctx)
 
 	db := client.Database("myapp")
@@ -132,7 +131,7 @@ func Example_basic() {
 func Example_withResumeToken() {
 	ctx := context.Background()
 
-	client, _ := mongo.Connect(ctx, options.Client().ApplyURI("mongodb://localhost:27017"))
+	client, _ := mongo.Connect(options.Client().ApplyURI("mongodb://localhost:27017"))
 	defer client.Disconnect(ctx)
 
 	db := client.Database("myapp")
@@ -182,7 +181,7 @@ func Example_withResumeToken() {
 func Example_withAckStore() {
 	ctx := context.Background()
 
-	client, _ := mongo.Connect(ctx, options.Client().ApplyURI("mongodb://localhost:27017"))
+	client, _ := mongo.Connect(options.Client().ApplyURI("mongodb://localhost:27017"))
 	defer client.Disconnect(ctx)
 
 	db := client.Database("myapp")
@@ -219,7 +218,7 @@ func Example_withAckStore() {
 func Example_withPipeline() {
 	ctx := context.Background()
 
-	client, _ := mongo.Connect(ctx, options.Client().ApplyURI("mongodb://localhost:27017"))
+	client, _ := mongo.Connect(options.Client().ApplyURI("mongodb://localhost:27017"))
 	defer client.Disconnect(ctx)
 
 	db := client.Database("myapp")
@@ -276,7 +275,7 @@ func Example_withPipeline() {
 func Example_fullDocumentOnly() {
 	ctx := context.Background()
 
-	client, _ := mongo.Connect(ctx, options.Client().ApplyURI("mongodb://localhost:27017"))
+	client, _ := mongo.Connect(options.Client().ApplyURI("mongodb://localhost:27017"))
 	defer client.Disconnect(ctx)
 
 	db := client.Database("myapp")
@@ -319,7 +318,7 @@ func Example_fullDocumentOnly() {
 func Example_watchLevels() {
 	ctx := context.Background()
 
-	client, _ := mongo.Connect(ctx, options.Client().ApplyURI("mongodb://localhost:27017"))
+	client, _ := mongo.Connect(options.Client().ApplyURI("mongodb://localhost:27017"))
 	defer client.Disconnect(ctx)
 
 	db := client.Database("myapp")
@@ -360,7 +359,7 @@ func Example_watchLevels() {
 func Example_withDistributed() {
 	ctx := context.Background()
 
-	client, _ := mongo.Connect(ctx, options.Client().ApplyURI("mongodb://localhost:27017"))
+	client, _ := mongo.Connect(options.Client().ApplyURI("mongodb://localhost:27017"))
 	defer client.Disconnect(ctx)
 
 	db := client.Database("myapp")
@@ -433,7 +432,7 @@ func Example_withDistributed() {
 func Example_withIdempotency() {
 	ctx := context.Background()
 
-	client, _ := mongo.Connect(ctx, options.Client().ApplyURI("mongodb://localhost:27017"))
+	client, _ := mongo.Connect(options.Client().ApplyURI("mongodb://localhost:27017"))
 	defer client.Disconnect(ctx)
 
 	db := client.Database("myapp")
@@ -498,7 +497,7 @@ func Example_withIdempotency() {
 func Example_completeSetup() {
 	ctx := context.Background()
 
-	client, _ := mongo.Connect(ctx, options.Client().ApplyURI("mongodb://localhost:27017"))
+	client, _ := mongo.Connect(options.Client().ApplyURI("mongodb://localhost:27017"))
 	defer client.Disconnect(ctx)
 
 	db := client.Database("myapp")

@@ -10,9 +10,8 @@ import (
 	"time"
 
 	event "github.com/rbaliyan/event/v3"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
-	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
 )
 
 // --- validate() tests ---
@@ -193,7 +192,7 @@ func TestIsEmptyUpdate(t *testing.T) {
 // --- formatDocumentKey() tests ---
 
 func TestFormatDocumentKey(t *testing.T) {
-	oid := primitive.NewObjectID()
+	oid := bson.NewObjectID()
 
 	tests := []struct {
 		name string
@@ -209,7 +208,7 @@ func TestFormatDocumentKey(t *testing.T) {
 		{name: "float64", id: 3.14, want: "3.14"},
 		{
 			name: "Binary",
-			id:   primitive.Binary{Subtype: 4, Data: []byte{0xab, 0xcd}},
+			id:   bson.Binary{Subtype: 4, Data: []byte{0xab, 0xcd}},
 			want: "abcd",
 		},
 		{
@@ -232,7 +231,7 @@ func TestFormatDocumentKey(t *testing.T) {
 // --- convertBSONTypes() tests ---
 
 func TestConvertBSONTypes(t *testing.T) {
-	oid := primitive.NewObjectID()
+	oid := bson.NewObjectID()
 
 	t.Run("ObjectID", func(t *testing.T) {
 		result := convertBSONTypes(oid)
@@ -246,7 +245,7 @@ func TestConvertBSONTypes(t *testing.T) {
 	})
 
 	t.Run("DateTime", func(t *testing.T) {
-		dt := primitive.NewDateTimeFromTime(time.Date(2025, 1, 15, 10, 30, 0, 0, time.UTC))
+		dt := bson.NewDateTimeFromTime(time.Date(2025, 1, 15, 10, 30, 0, 0, time.UTC))
 		result := convertBSONTypes(dt)
 		s, ok := result.(string)
 		if !ok {
@@ -262,7 +261,7 @@ func TestConvertBSONTypes(t *testing.T) {
 	})
 
 	t.Run("Timestamp", func(t *testing.T) {
-		ts := primitive.Timestamp{T: 1705300200, I: 1}
+		ts := bson.Timestamp{T: 1705300200, I: 1}
 		result := convertBSONTypes(ts)
 		s, ok := result.(string)
 		if !ok {
@@ -278,7 +277,7 @@ func TestConvertBSONTypes(t *testing.T) {
 	})
 
 	t.Run("Decimal128", func(t *testing.T) {
-		d, _ := primitive.ParseDecimal128("123.456")
+		d, _ := bson.ParseDecimal128("123.456")
 		result := convertBSONTypes(d)
 		s, ok := result.(string)
 		if !ok {
@@ -290,7 +289,7 @@ func TestConvertBSONTypes(t *testing.T) {
 	})
 
 	t.Run("Binary", func(t *testing.T) {
-		b := primitive.Binary{Subtype: 4, Data: []byte{1, 2, 3}}
+		b := bson.Binary{Subtype: 4, Data: []byte{1, 2, 3}}
 		result := convertBSONTypes(b)
 		m, ok := result.(map[string]any)
 		if !ok {
@@ -381,7 +380,7 @@ func TestBsonMToMap(t *testing.T) {
 	})
 
 	t.Run("converts types", func(t *testing.T) {
-		oid := primitive.NewObjectID()
+		oid := bson.NewObjectID()
 		result := bsonMToMap(bson.M{
 			"name": "test",
 			"id":   oid,
@@ -408,14 +407,14 @@ func TestExtractChangeEvent(t *testing.T) {
 	// Give tr a db-like fallback by leaving db nil but setting collectionName
 
 	t.Run("insert with full document", func(t *testing.T) {
-		oid := primitive.NewObjectID()
+		oid := bson.NewObjectID()
 		raw := bson.M{
 			"_id":           bson.M{"_data": "resume-token-123"},
 			"operationType": "insert",
 			"ns":            bson.M{"db": "testdb", "coll": "orders"},
 			"documentKey":   bson.M{"_id": oid},
 			"fullDocument":  bson.M{"_id": oid, "name": "test"},
-			"clusterTime":   primitive.Timestamp{T: 1705300200, I: 1},
+			"clusterTime":   bson.Timestamp{T: 1705300200, I: 1},
 		}
 
 		event := tr.extractChangeEvent(raw)
@@ -494,7 +493,7 @@ func TestExtractChangeEvent(t *testing.T) {
 	})
 
 	t.Run("delete without full document", func(t *testing.T) {
-		oid := primitive.NewObjectID()
+		oid := bson.NewObjectID()
 		raw := bson.M{
 			"_id":           bson.M{"_data": "token-789"},
 			"operationType": "delete",
@@ -1145,7 +1144,7 @@ func TestBsonToJSON(t *testing.T) {
 	})
 
 	t.Run("document with ObjectID", func(t *testing.T) {
-		oid := primitive.NewObjectID()
+		oid := bson.NewObjectID()
 		doc := bson.M{"_id": oid}
 		data, err := bsonToJSON(doc)
 		if err != nil {
@@ -1294,7 +1293,7 @@ func TestExtractChangeEvent_EdgeCases(t *testing.T) {
 	})
 
 	t.Run("clusterTime sets timestamp", func(t *testing.T) {
-		ts := primitive.Timestamp{T: 1700000000, I: 1}
+		ts := bson.Timestamp{T: 1700000000, I: 1}
 		raw := bson.M{
 			"clusterTime": ts,
 		}
