@@ -3,15 +3,12 @@ module github.com/rbaliyan/event-mongodb
 go 1.24.0
 
 require (
-	github.com/rbaliyan/event/v3 v3.6.14
-	go.mongodb.org/mongo-driver v1.17.8
+	github.com/rbaliyan/event/v3 v3.7.0
 	go.mongodb.org/mongo-driver/v2 v2.2.0
 	go.opentelemetry.io/otel v1.40.0
 	go.opentelemetry.io/otel/metric v1.40.0
 	go.opentelemetry.io/otel/sdk/metric v1.40.0
 )
-
-replace github.com/rbaliyan/event/v3 => ../event
 
 require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
@@ -21,7 +18,6 @@ require (
 	github.com/golang/snappy v1.0.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/klauspost/compress v1.18.1 // indirect
-	github.com/montanaflynn/stats v0.7.1 // indirect
 	github.com/redis/go-redis/v9 v9.17.2 // indirect
 	github.com/vmihailenco/msgpack/v5 v5.4.1 // indirect
 	github.com/vmihailenco/tagparser/v2 v2.0.0 // indirect
