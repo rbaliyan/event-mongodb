@@ -1095,6 +1095,17 @@ func (t *Transport) watchOnce(ctx context.Context, onConnected func()) error {
 		}
 	}
 
+	// When startFromBeginning is enabled and no existing token, set startAtOperationTime
+	// to the earliest possible timestamp. MongoDB will adjust to the earliest available
+	// position in the oplog if this timestamp is before the oplog window.
+	if !hasExistingToken && t.startFromBeginning {
+		// Use timestamp 1 - MongoDB will either start from the earliest oplog entry
+		// or return ChangeStreamHistoryLost if the oplog doesn't go back that far,
+		// which we handle in the retry logic.
+		csOpts.SetStartAtOperationTime(&bson.Timestamp{T: 1, I: 0})
+		t.logger.Info("starting from beginning of oplog (no resume token, startFromBeginning enabled)", "key", resumeKey)
+	}
+
 	// Open change stream based on watch level
 	var cs *mongo.ChangeStream
 	var err error
@@ -1149,9 +1160,8 @@ func (t *Transport) watchOnce(ctx context.Context, onConnected func()) error {
 				t.logger.Info("saved initial resume token, starting from current position", "key", resumeKey)
 			}
 		}
-	} else if !hasExistingToken && t.startFromBeginning {
-		t.logger.Info("starting from beginning of oplog (no resume token, startFromBeginning enabled)", "key", resumeKey)
 	}
+	// Note: startFromBeginning case is handled above before opening the change stream
 
 	// Process changes
 	connected := false
