@@ -363,17 +363,17 @@ func TestConvertBSONTypes(t *testing.T) {
 	})
 }
 
-// --- bsonMToMap() tests ---
+// --- bsonDToMap() tests ---
 
-func TestBsonMToMap(t *testing.T) {
+func TestBsonDToMap(t *testing.T) {
 	t.Run("nil input", func(t *testing.T) {
-		if bsonMToMap(nil) != nil {
+		if bsonDToMap(nil) != nil {
 			t.Error("expected nil for nil input")
 		}
 	})
 
-	t.Run("empty map", func(t *testing.T) {
-		result := bsonMToMap(bson.M{})
+	t.Run("empty doc", func(t *testing.T) {
+		result := bsonDToMap(bson.D{})
 		if result == nil || len(result) != 0 {
 			t.Errorf("expected empty map, got %v", result)
 		}
@@ -381,9 +381,9 @@ func TestBsonMToMap(t *testing.T) {
 
 	t.Run("converts types", func(t *testing.T) {
 		oid := bson.NewObjectID()
-		result := bsonMToMap(bson.M{
-			"name": "test",
-			"id":   oid,
+		result := bsonDToMap(bson.D{
+			{Key: "name", Value: "test"},
+			{Key: "id", Value: oid},
 		})
 		if result["name"] != "test" {
 			t.Errorf("name = %v, want test", result["name"])
@@ -408,13 +408,13 @@ func TestExtractChangeEvent(t *testing.T) {
 
 	t.Run("insert with full document", func(t *testing.T) {
 		oid := bson.NewObjectID()
-		raw := bson.M{
-			"_id":           bson.M{"_data": "resume-token-123"},
-			"operationType": "insert",
-			"ns":            bson.M{"db": "testdb", "coll": "orders"},
-			"documentKey":   bson.M{"_id": oid},
-			"fullDocument":  bson.M{"_id": oid, "name": "test"},
-			"clusterTime":   bson.Timestamp{T: 1705300200, I: 1},
+		raw := bson.D{
+			{Key: "_id", Value: bson.D{{Key: "_data", Value: "resume-token-123"}}},
+			{Key: "operationType", Value: "insert"},
+			{Key: "ns", Value: bson.D{{Key: "db", Value: "testdb"}, {Key: "coll", Value: "orders"}}},
+			{Key: "documentKey", Value: bson.D{{Key: "_id", Value: oid}}},
+			{Key: "fullDocument", Value: bson.D{{Key: "_id", Value: oid}, {Key: "name", Value: "test"}}},
+			{Key: "clusterTime", Value: bson.Timestamp{T: 1705300200, I: 1}},
 		}
 
 		event := tr.extractChangeEvent(raw)
@@ -446,19 +446,19 @@ func TestExtractChangeEvent(t *testing.T) {
 	})
 
 	t.Run("update with updateDescription", func(t *testing.T) {
-		raw := bson.M{
-			"_id":           bson.M{"_data": "token-456"},
-			"operationType": "update",
-			"ns":            bson.M{"db": "testdb", "coll": "orders"},
-			"documentKey":   bson.M{"_id": "string-id"},
-			"updateDescription": bson.M{
-				"updatedFields": bson.M{"status": "shipped", "count": int32(5)},
-				"removedFields": bson.A{"old_field", "deprecated"},
-				"truncatedArrays": bson.A{
-					bson.M{"field": "items", "newSize": int32(10)},
-					bson.M{"field": "tags", "newSize": int32(3)},
-				},
-			},
+		raw := bson.D{
+			{Key: "_id", Value: bson.D{{Key: "_data", Value: "token-456"}}},
+			{Key: "operationType", Value: "update"},
+			{Key: "ns", Value: bson.D{{Key: "db", Value: "testdb"}, {Key: "coll", Value: "orders"}}},
+			{Key: "documentKey", Value: bson.D{{Key: "_id", Value: "string-id"}}},
+			{Key: "updateDescription", Value: bson.D{
+				{Key: "updatedFields", Value: bson.D{{Key: "status", Value: "shipped"}, {Key: "count", Value: int32(5)}}},
+				{Key: "removedFields", Value: bson.A{"old_field", "deprecated"}},
+				{Key: "truncatedArrays", Value: bson.A{
+					bson.D{{Key: "field", Value: "items"}, {Key: "newSize", Value: int32(10)}},
+					bson.D{{Key: "field", Value: "tags"}, {Key: "newSize", Value: int32(3)}},
+				}},
+			}},
 		}
 
 		event := tr.extractChangeEvent(raw)
@@ -494,11 +494,11 @@ func TestExtractChangeEvent(t *testing.T) {
 
 	t.Run("delete without full document", func(t *testing.T) {
 		oid := bson.NewObjectID()
-		raw := bson.M{
-			"_id":           bson.M{"_data": "token-789"},
-			"operationType": "delete",
-			"ns":            bson.M{"db": "testdb", "coll": "orders"},
-			"documentKey":   bson.M{"_id": oid},
+		raw := bson.D{
+			{Key: "_id", Value: bson.D{{Key: "_data", Value: "token-789"}}},
+			{Key: "operationType", Value: "delete"},
+			{Key: "ns", Value: bson.D{{Key: "db", Value: "testdb"}, {Key: "coll", Value: "orders"}}},
+			{Key: "documentKey", Value: bson.D{{Key: "_id", Value: oid}}},
 		}
 
 		event := tr.extractChangeEvent(raw)
@@ -515,8 +515,8 @@ func TestExtractChangeEvent(t *testing.T) {
 	})
 
 	t.Run("missing fields use fallbacks", func(t *testing.T) {
-		raw := bson.M{
-			"operationType": "insert",
+		raw := bson.D{
+			{Key: "operationType", Value: "insert"},
 		}
 
 		event := tr.extractChangeEvent(raw)
@@ -1121,17 +1121,17 @@ func TestWithMaxAwaitTime(t *testing.T) {
 	}
 }
 
-// --- bsonToJSON() tests ---
+// --- bsonDToJSON() tests ---
 
-func TestBsonToJSON(t *testing.T) {
+func TestBsonDToJSON(t *testing.T) {
 	t.Run("simple document", func(t *testing.T) {
-		doc := bson.M{
-			"name":  "test",
-			"count": int32(42),
+		doc := bson.D{
+			{Key: "name", Value: "test"},
+			{Key: "count", Value: int32(42)},
 		}
-		data, err := bsonToJSON(doc)
+		data, err := bsonDToJSON(doc)
 		if err != nil {
-			t.Fatalf("bsonToJSON() error: %v", err)
+			t.Fatalf("bsonDToJSON() error: %v", err)
 		}
 
 		var result map[string]any
@@ -1145,10 +1145,10 @@ func TestBsonToJSON(t *testing.T) {
 
 	t.Run("document with ObjectID", func(t *testing.T) {
 		oid := bson.NewObjectID()
-		doc := bson.M{"_id": oid}
-		data, err := bsonToJSON(doc)
+		doc := bson.D{{Key: "_id", Value: oid}}
+		data, err := bsonDToJSON(doc)
 		if err != nil {
-			t.Fatalf("bsonToJSON() error: %v", err)
+			t.Fatalf("bsonDToJSON() error: %v", err)
 		}
 
 		var result map[string]any
@@ -1165,12 +1165,12 @@ func TestBsonToJSON(t *testing.T) {
 	})
 
 	t.Run("nested arrays", func(t *testing.T) {
-		doc := bson.M{
-			"tags": bson.A{"go", "mongodb"},
+		doc := bson.D{
+			{Key: "tags", Value: bson.A{"go", "mongodb"}},
 		}
-		data, err := bsonToJSON(doc)
+		data, err := bsonDToJSON(doc)
 		if err != nil {
-			t.Fatalf("bsonToJSON() error: %v", err)
+			t.Fatalf("bsonDToJSON() error: %v", err)
 		}
 
 		var result map[string]any
@@ -1268,7 +1268,7 @@ func TestExtractChangeEvent_EdgeCases(t *testing.T) {
 	tr := &Transport{}
 
 	t.Run("empty raw document", func(t *testing.T) {
-		raw := bson.M{}
+		raw := bson.D{}
 		ev := tr.extractChangeEvent(raw)
 		// Should not panic, ID should be auto-generated
 		if ev.ID == "" {
@@ -1280,8 +1280,8 @@ func TestExtractChangeEvent_EdgeCases(t *testing.T) {
 	})
 
 	t.Run("ns with only db", func(t *testing.T) {
-		raw := bson.M{
-			"ns": bson.M{"db": "mydb"},
+		raw := bson.D{
+			{Key: "ns", Value: bson.D{{Key: "db", Value: "mydb"}}},
 		}
 		ev := tr.extractChangeEvent(raw)
 		if ev.Database != "mydb" {
@@ -1294,8 +1294,8 @@ func TestExtractChangeEvent_EdgeCases(t *testing.T) {
 
 	t.Run("clusterTime sets timestamp", func(t *testing.T) {
 		ts := bson.Timestamp{T: 1700000000, I: 1}
-		raw := bson.M{
-			"clusterTime": ts,
+		raw := bson.D{
+			{Key: "clusterTime", Value: ts},
 		}
 		ev := tr.extractChangeEvent(raw)
 		if ev.Timestamp.Unix() != 1700000000 {
@@ -1304,8 +1304,8 @@ func TestExtractChangeEvent_EdgeCases(t *testing.T) {
 	})
 
 	t.Run("documentKey with int32 id", func(t *testing.T) {
-		raw := bson.M{
-			"documentKey": bson.M{"_id": int32(42)},
+		raw := bson.D{
+			{Key: "documentKey", Value: bson.D{{Key: "_id", Value: int32(42)}}},
 		}
 		ev := tr.extractChangeEvent(raw)
 		if ev.DocumentKey != "42" {
@@ -1314,8 +1314,8 @@ func TestExtractChangeEvent_EdgeCases(t *testing.T) {
 	})
 
 	t.Run("documentKey with int64 id", func(t *testing.T) {
-		raw := bson.M{
-			"documentKey": bson.M{"_id": int64(999)},
+		raw := bson.D{
+			{Key: "documentKey", Value: bson.D{{Key: "_id", Value: int64(999)}}},
 		}
 		ev := tr.extractChangeEvent(raw)
 		if ev.DocumentKey != "999" {
@@ -1324,11 +1324,11 @@ func TestExtractChangeEvent_EdgeCases(t *testing.T) {
 	})
 
 	t.Run("updateDescription with empty fields", func(t *testing.T) {
-		raw := bson.M{
-			"updateDescription": bson.M{
-				"updatedFields": bson.M{},
-				"removedFields": bson.A{},
-			},
+		raw := bson.D{
+			{Key: "updateDescription", Value: bson.D{
+				{Key: "updatedFields", Value: bson.D{}},
+				{Key: "removedFields", Value: bson.A{}},
+			}},
 		}
 		ev := tr.extractChangeEvent(raw)
 		if ev.UpdateDesc == nil {

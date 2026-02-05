@@ -1175,8 +1175,9 @@ var _ changeStream = (*mongo.ChangeStream)(nil)
 
 // processChange processes a single change event from the change stream.
 func (t *Transport) processChange(ctx context.Context, cs changeStream) error {
-	// Decode raw change document
-	var raw bson.M
+	// Decode raw change document as bson.D (ordered document).
+	// In mongo-driver v2, nested documents are returned as bson.D by default.
+	var raw bson.D
 	if err := cs.Decode(&raw); err != nil {
 		return err
 	}
@@ -1211,7 +1212,7 @@ func (t *Transport) processChange(ctx context.Context, cs changeStream) error {
 
 // buildPayload creates the event payload based on transport mode.
 // Returns nil payload if the event should be skipped.
-func (t *Transport) buildPayload(raw bson.M, event ChangeEvent) ([]byte, string, error) {
+func (t *Transport) buildPayload(raw bson.D, event ChangeEvent) ([]byte, string, error) {
 	if t.fullDocumentOnly {
 		return t.buildFullDocumentPayload(raw, event)
 	}
@@ -1224,11 +1225,11 @@ func (t *Transport) buildPayload(raw bson.M, event ChangeEvent) ([]byte, string,
 }
 
 // buildFullDocumentPayload creates a BSON payload from the raw fullDocument.
-func (t *Transport) buildFullDocumentPayload(raw bson.M, event ChangeEvent) ([]byte, string, error) {
+func (t *Transport) buildFullDocumentPayload(raw bson.D, event ChangeEvent) ([]byte, string, error) {
 	contentType := "application/bson"
 
 	// Send the raw fullDocument BSON - preserves all MongoDB types
-	if fullDoc, ok := raw["fullDocument"]; ok && fullDoc != nil {
+	if fullDoc := bsonDLookup(raw, "fullDocument"); fullDoc != nil {
 		payload, err := bson.Marshal(fullDoc)
 		if err != nil {
 			return nil, "", err
@@ -1341,7 +1342,7 @@ func (t *Transport) storeAndPublish(event ChangeEvent, msg transport.Message) er
 }
 
 // extractChangeEvent extracts a ChangeEvent from raw BSON.
-func (t *Transport) extractChangeEvent(raw bson.M) ChangeEvent {
+func (t *Transport) extractChangeEvent(raw bson.D) ChangeEvent {
 	event := ChangeEvent{
 		Timestamp: time.Now(),
 	}
@@ -1357,14 +1358,38 @@ func (t *Transport) extractChangeEvent(raw bson.M) ChangeEvent {
 	return event
 }
 
+// bsonDLookup returns the value for a key in a bson.D, or nil if not found.
+func bsonDLookup(d bson.D, key string) any {
+	for _, elem := range d {
+		if elem.Key == key {
+			return elem.Value
+		}
+	}
+	return nil
+}
+
+// bsonDToMap converts bson.D to a map for easier access.
+// Nested bson.D values are also converted recursively.
+// BSON types (ObjectID, DateTime, etc.) are converted to JSON-friendly formats.
+func bsonDToMap(d bson.D) map[string]any {
+	if d == nil {
+		return nil
+	}
+	m := make(map[string]any, len(d))
+	for _, elem := range d {
+		m[elem.Key] = convertBSONTypes(elem.Value)
+	}
+	return m
+}
+
 // extractNamespace populates Database, Collection, and Namespace from the
 // raw change event's "ns" field, falling back to Transport-level defaults.
-func (t *Transport) extractNamespace(raw bson.M, event *ChangeEvent) {
-	if ns, ok := raw["ns"].(bson.M); ok {
-		if db, ok := ns["db"].(string); ok {
+func (t *Transport) extractNamespace(raw bson.D, event *ChangeEvent) {
+	if ns, ok := bsonDLookup(raw, "ns").(bson.D); ok {
+		if db, ok := bsonDLookup(ns, "db").(string); ok {
 			event.Database = db
 		}
-		if coll, ok := ns["coll"].(string); ok {
+		if coll, ok := bsonDLookup(ns, "coll").(string); ok {
 			event.Collection = coll
 		}
 	}
@@ -1379,9 +1404,9 @@ func (t *Transport) extractNamespace(raw bson.M, event *ChangeEvent) {
 
 // extractEventID populates the event ID from the resume token "_id._data"
 // field, falling back to a generated ID.
-func extractEventID(raw bson.M, event *ChangeEvent) {
-	if id, ok := raw["_id"].(bson.M); ok {
-		if data, ok := id["_data"].(string); ok {
+func extractEventID(raw bson.D, event *ChangeEvent) {
+	if id, ok := bsonDLookup(raw, "_id").(bson.D); ok {
+		if data, ok := bsonDLookup(id, "_data").(string); ok {
 			event.ID = data
 		}
 	}
@@ -1391,30 +1416,34 @@ func extractEventID(raw bson.M, event *ChangeEvent) {
 }
 
 // extractOperationType populates the operation type from the raw change event.
-func extractOperationType(raw bson.M, event *ChangeEvent) {
-	if opType, ok := raw["operationType"].(string); ok {
+func extractOperationType(raw bson.D, event *ChangeEvent) {
+	if opType, ok := bsonDLookup(raw, "operationType").(string); ok {
 		event.OperationType = OperationType(opType)
 	}
 }
 
 // extractDocumentKey populates the document key from the raw change event.
-func extractDocumentKey(raw bson.M, event *ChangeEvent) {
-	if docKey, ok := raw["documentKey"].(bson.M); ok {
-		event.DocumentKey = formatDocumentKey(docKey["_id"])
+func extractDocumentKey(raw bson.D, event *ChangeEvent) {
+	if docKey, ok := bsonDLookup(raw, "documentKey").(bson.D); ok {
+		event.DocumentKey = formatDocumentKey(bsonDLookup(docKey, "_id"))
 	}
 }
 
 // extractFullDocument populates the JSON-encoded full document from the raw
-// change event. Handles both bson.M and bson.Raw representations.
-func extractFullDocument(raw bson.M, event *ChangeEvent) {
-	if fullDoc, ok := raw["fullDocument"].(bson.M); ok {
-		if jsonData, err := bsonToJSON(fullDoc); err == nil {
+// change event. Handles bson.D and bson.Raw representations.
+func extractFullDocument(raw bson.D, event *ChangeEvent) {
+	fullDocVal := bsonDLookup(raw, "fullDocument")
+	if fullDocVal == nil {
+		return
+	}
+	if fullDoc, ok := fullDocVal.(bson.D); ok {
+		if jsonData, err := bsonDToJSON(fullDoc); err == nil {
 			event.FullDocument = jsonData
 		}
-	} else if fullDoc, ok := raw["fullDocument"].(bson.Raw); ok {
-		var doc bson.M
+	} else if fullDoc, ok := fullDocVal.(bson.Raw); ok {
+		var doc bson.D
 		if err := bson.Unmarshal(fullDoc, &doc); err == nil {
-			if jsonData, err := bsonToJSON(doc); err == nil {
+			if jsonData, err := bsonDToJSON(doc); err == nil {
 				event.FullDocument = jsonData
 			}
 		}
@@ -1423,26 +1452,26 @@ func extractFullDocument(raw bson.M, event *ChangeEvent) {
 
 // extractUpdateDescription populates the UpdateDescription from the raw
 // change event's "updateDescription" field.
-func extractUpdateDescription(raw bson.M, event *ChangeEvent) {
-	updateDesc, ok := raw["updateDescription"].(bson.M)
+func extractUpdateDescription(raw bson.D, event *ChangeEvent) {
+	updateDesc, ok := bsonDLookup(raw, "updateDescription").(bson.D)
 	if !ok {
 		return
 	}
 	event.UpdateDesc = &UpdateDescription{}
-	if updated, ok := updateDesc["updatedFields"].(bson.M); ok {
-		event.UpdateDesc.UpdatedFields = bsonMToMap(updated)
+	if updated, ok := bsonDLookup(updateDesc, "updatedFields").(bson.D); ok {
+		event.UpdateDesc.UpdatedFields = bsonDToMap(updated)
 	}
-	if removed, ok := updateDesc["removedFields"].(bson.A); ok {
+	if removed, ok := bsonDLookup(updateDesc, "removedFields").(bson.A); ok {
 		for _, f := range removed {
 			if s, ok := f.(string); ok {
 				event.UpdateDesc.RemovedFields = append(event.UpdateDesc.RemovedFields, s)
 			}
 		}
 	}
-	if truncated, ok := updateDesc["truncatedArrays"].(bson.A); ok {
+	if truncated, ok := bsonDLookup(updateDesc, "truncatedArrays").(bson.A); ok {
 		for _, f := range truncated {
-			if ta, ok := f.(bson.M); ok {
-				if field, ok := ta["field"].(string); ok {
+			if ta, ok := f.(bson.D); ok {
+				if field, ok := bsonDLookup(ta, "field").(string); ok {
 					event.UpdateDesc.TruncatedArrays = append(event.UpdateDesc.TruncatedArrays, field)
 				}
 			}
@@ -1452,8 +1481,8 @@ func extractUpdateDescription(raw bson.M, event *ChangeEvent) {
 
 // extractTimestamp populates the event timestamp from the raw change event's
 // "clusterTime" field.
-func extractTimestamp(raw bson.M, event *ChangeEvent) {
-	if ts, ok := raw["clusterTime"].(bson.Timestamp); ok {
+func extractTimestamp(raw bson.D, event *ChangeEvent) {
+	if ts, ok := bsonDLookup(raw, "clusterTime").(bson.Timestamp); ok {
 		event.Timestamp = time.Unix(int64(ts.T), 0)
 	}
 }
@@ -1484,8 +1513,8 @@ func formatDocumentKey(id any) string {
 	}
 }
 
-// bsonToJSON converts a BSON document to JSON, handling MongoDB-specific types.
-func bsonToJSON(doc bson.M) (json.RawMessage, error) {
+// bsonDToJSON converts a BSON document (bson.D) to JSON, handling MongoDB-specific types.
+func bsonDToJSON(doc bson.D) (json.RawMessage, error) {
 	// Convert MongoDB types to JSON-friendly types
 	converted := convertBSONTypes(doc)
 	return json.Marshal(converted)
@@ -1496,6 +1525,12 @@ func bsonToJSON(doc bson.M) (json.RawMessage, error) {
 // back into their original Go types (e.g., bson.ObjectID).
 func convertBSONTypes(v any) any {
 	switch val := v.(type) {
+	case bson.D:
+		result := make(map[string]any, len(val))
+		for _, elem := range val {
+			result[elem.Key] = convertBSONTypes(elem.Value)
+		}
+		return result
 	case bson.M:
 		result := make(map[string]any, len(val))
 		for k, v := range val {
@@ -1524,18 +1559,6 @@ func convertBSONTypes(v any) any {
 	default:
 		return val
 	}
-}
-
-// bsonMToMap converts bson.M to map[string]any with type conversion.
-func bsonMToMap(m bson.M) map[string]any {
-	if m == nil {
-		return nil
-	}
-	result := make(map[string]any, len(m))
-	for k, v := range m {
-		result[k] = convertBSONTypes(v)
-	}
-	return result
 }
 
 // isEmptyUpdate returns true if the event is an update operation
