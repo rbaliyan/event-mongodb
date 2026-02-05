@@ -187,6 +187,39 @@ type UpdateDescription struct {
 	TruncatedArrays []string       `json:"truncated_arrays,omitempty"`
 }
 
+// changeStreamDoc represents the MongoDB change stream document structure.
+// Using a struct with bson tags provides type safety and cleaner code than
+// manual bson.D parsing. See: https://www.mongodb.com/docs/manual/reference/change-events/
+type changeStreamDoc struct {
+	ID            changeStreamID      `bson:"_id"`
+	OperationType string              `bson:"operationType"`
+	NS            changeStreamNS      `bson:"ns"`
+	DocumentKey   bson.D              `bson:"documentKey"`
+	FullDocument  bson.Raw            `bson:"fullDocument,omitempty"`
+	UpdateDesc    *changeStreamUpdate `bson:"updateDescription,omitempty"`
+	ClusterTime   bson.Timestamp      `bson:"clusterTime"`
+}
+
+type changeStreamID struct {
+	Data string `bson:"_data"`
+}
+
+type changeStreamNS struct {
+	DB   string `bson:"db"`
+	Coll string `bson:"coll"`
+}
+
+type changeStreamUpdate struct {
+	UpdatedFields   bson.D            `bson:"updatedFields"`
+	RemovedFields   []string          `bson:"removedFields"`
+	TruncatedArrays []truncatedArray  `bson:"truncatedArrays,omitempty"`
+}
+
+type truncatedArray struct {
+	Field   string `bson:"field"`
+	NewSize int32  `bson:"newSize"`
+}
+
 // ResumeTokenStore persists resume tokens for reliable change stream resumption.
 // Implement this interface to store tokens in MongoDB, Redis, or another backend.
 type ResumeTokenStore interface {
@@ -1337,16 +1370,15 @@ type changeStream interface {
 var _ changeStream = (*mongo.ChangeStream)(nil)
 
 // processChange processes a single change event from the change stream.
-func (t *Transport) processChange(ctx context.Context, cs changeStream) error {
-	// Decode raw change document as bson.D (ordered document).
-	// In mongo-driver v2, nested documents are returned as bson.D by default.
-	var raw bson.D
-	if err := cs.Decode(&raw); err != nil {
+func (t *Transport) processChange(_ context.Context, cs changeStream) error {
+	// Decode change document into typed struct for type safety.
+	var doc changeStreamDoc
+	if err := cs.Decode(&doc); err != nil {
 		return err
 	}
 
 	// Extract change event data
-	changeEvent := t.extractChangeEvent(raw)
+	changeEvent := t.extractChangeEvent(doc)
 
 	t.logger.Debug("change event received",
 		"operation", changeEvent.OperationType,
@@ -1363,7 +1395,7 @@ func (t *Transport) processChange(ctx context.Context, cs changeStream) error {
 	}
 
 	// Build payload and content type
-	payload, contentType, err := t.buildPayload(raw, changeEvent)
+	payload, contentType, err := t.buildPayload(doc, changeEvent)
 	if err != nil {
 		return err
 	}
@@ -1398,9 +1430,9 @@ func (t *Transport) processChange(ctx context.Context, cs changeStream) error {
 
 // buildPayload creates the event payload based on transport mode.
 // Returns nil payload if the event should be skipped.
-func (t *Transport) buildPayload(raw bson.D, event ChangeEvent) ([]byte, string, error) {
+func (t *Transport) buildPayload(doc changeStreamDoc, event ChangeEvent) ([]byte, string, error) {
 	if t.fullDocumentOnly {
-		return t.buildFullDocumentPayload(raw, event)
+		return t.buildFullDocumentPayload(doc, event)
 	}
 	// Send the entire ChangeEvent as JSON
 	payload, err := json.Marshal(event)
@@ -1411,18 +1443,13 @@ func (t *Transport) buildPayload(raw bson.D, event ChangeEvent) ([]byte, string,
 }
 
 // buildFullDocumentPayload creates a BSON payload from the raw fullDocument.
-func (t *Transport) buildFullDocumentPayload(raw bson.D, event ChangeEvent) ([]byte, string, error) {
+func (t *Transport) buildFullDocumentPayload(doc changeStreamDoc, event ChangeEvent) ([]byte, string, error) {
 	contentType := "application/bson"
 
 	// Send the raw fullDocument BSON - preserves all MongoDB types
-	if fullDoc := bsonDLookup(raw, "fullDocument"); fullDoc != nil {
-		payload, err := bson.Marshal(fullDoc)
-		if err != nil {
-			return nil, "", err
-		}
-		if len(payload) > 0 {
-			return payload, contentType, nil
-		}
+	if doc.FullDocument != nil && len(doc.FullDocument) > 0 {
+		// FullDocument is already bson.Raw, just return it directly
+		return []byte(doc.FullDocument), contentType, nil
 	}
 
 	// For delete events, send just the document ID as a string
@@ -1535,24 +1562,61 @@ func (t *Transport) storeAndPublish(event ChangeEvent, msg transport.Message) er
 	return publishErr
 }
 
-// extractChangeEvent extracts a ChangeEvent from raw BSON.
-func (t *Transport) extractChangeEvent(raw bson.D) ChangeEvent {
+// extractChangeEvent extracts a ChangeEvent from the typed change stream document.
+func (t *Transport) extractChangeEvent(doc changeStreamDoc) ChangeEvent {
 	event := ChangeEvent{
-		Timestamp: time.Now(),
+		ID:            doc.ID.Data,
+		OperationType: OperationType(doc.OperationType),
+		Database:      doc.NS.DB,
+		Collection:    doc.NS.Coll,
+		Timestamp:     time.Unix(int64(doc.ClusterTime.T), 0),
 	}
 
-	t.extractNamespace(raw, &event)
-	extractEventID(raw, &event)
-	extractOperationType(raw, &event)
-	extractDocumentKey(raw, &event)
-	extractFullDocument(raw, &event)
-	extractUpdateDescription(raw, &event)
-	extractTimestamp(raw, &event)
+	// Generate ID if not present in resume token
+	if event.ID == "" {
+		event.ID = transport.NewID()
+	}
+
+	// Fall back to transport-level defaults for namespace
+	if event.Database == "" && t.db != nil {
+		event.Database = t.db.Name()
+	}
+	if event.Collection == "" && t.collectionName != "" {
+		event.Collection = t.collectionName
+	}
+	event.Namespace = event.Database + "." + event.Collection
+
+	// Extract document key (_id field)
+	if id := bsonDLookup(doc.DocumentKey, "_id"); id != nil {
+		event.DocumentKey = formatDocumentKey(id)
+	}
+
+	// Extract full document as JSON
+	if doc.FullDocument != nil && len(doc.FullDocument) > 0 {
+		var fullDoc bson.D
+		if err := bson.Unmarshal(doc.FullDocument, &fullDoc); err == nil {
+			if jsonData, err := bsonDToJSON(fullDoc); err == nil {
+				event.FullDocument = jsonData
+			}
+		}
+	}
+
+	// Extract update description
+	if doc.UpdateDesc != nil {
+		event.UpdateDesc = &UpdateDescription{
+			UpdatedFields:   bsonDToMap(doc.UpdateDesc.UpdatedFields),
+			RemovedFields:   doc.UpdateDesc.RemovedFields,
+		}
+		for _, ta := range doc.UpdateDesc.TruncatedArrays {
+			event.UpdateDesc.TruncatedArrays = append(event.UpdateDesc.TruncatedArrays, ta.Field)
+		}
+	}
 
 	return event
 }
 
 // bsonDLookup returns the value for a key in a bson.D, or nil if not found.
+// Still needed for DocumentKey extraction since _id can be any type.
 func bsonDLookup(d bson.D, key string) any {
 	for _, elem := range d {
 		if elem.Key == key {
@@ -1574,111 +1638,6 @@ func bsonDToMap(d bson.D) map[string]any {
 		m[elem.Key] = convertBSONTypes(elem.Value)
 	}
 	return m
-}
-
-// extractNamespace populates Database, Collection, and Namespace from the
-// raw change event's "ns" field, falling back to Transport-level defaults.
-func (t *Transport) extractNamespace(raw bson.D, event *ChangeEvent) {
-	if ns, ok := bsonDLookup(raw, "ns").(bson.D); ok {
-		if db, ok := bsonDLookup(ns, "db").(string); ok {
-			event.Database = db
-		}
-		if coll, ok := bsonDLookup(ns, "coll").(string); ok {
-			event.Collection = coll
-		}
-	}
-	if event.Database == "" && t.db != nil {
-		event.Database = t.db.Name()
-	}
-	if event.Collection == "" && t.collectionName != "" {
-		event.Collection = t.collectionName
-	}
-	event.Namespace = event.Database + "." + event.Collection
-}
-
-// extractEventID populates the event ID from the resume token "_id._data"
-// field, falling back to a generated ID.
-func extractEventID(raw bson.D, event *ChangeEvent) {
-	if id, ok := bsonDLookup(raw, "_id").(bson.D); ok {
-		if data, ok := bsonDLookup(id, "_data").(string); ok {
-			event.ID = data
-		}
-	}
-	if event.ID == "" {
-		event.ID = transport.NewID()
-	}
-}
-
-// extractOperationType populates the operation type from the raw change event.
-func extractOperationType(raw bson.D, event *ChangeEvent) {
-	if opType, ok := bsonDLookup(raw, "operationType").(string); ok {
-		event.OperationType = OperationType(opType)
-	}
-}
-
-// extractDocumentKey populates the document key from the raw change event.
-func extractDocumentKey(raw bson.D, event *ChangeEvent) {
-	if docKey, ok := bsonDLookup(raw, "documentKey").(bson.D); ok {
-		event.DocumentKey = formatDocumentKey(bsonDLookup(docKey, "_id"))
-	}
-}
-
-// extractFullDocument populates the JSON-encoded full document from the raw
-// change event. Handles bson.D and bson.Raw representations.
-func extractFullDocument(raw bson.D, event *ChangeEvent) {
-	fullDocVal := bsonDLookup(raw, "fullDocument")
-	if fullDocVal == nil {
-		return
-	}
-	if fullDoc, ok := fullDocVal.(bson.D); ok {
-		if jsonData, err := bsonDToJSON(fullDoc); err == nil {
-			event.FullDocument = jsonData
-		}
-	} else if fullDoc, ok := fullDocVal.(bson.Raw); ok {
-		var doc bson.D
-		if err := bson.Unmarshal(fullDoc, &doc); err == nil {
-			if jsonData, err := bsonDToJSON(doc); err == nil {
-				event.FullDocument = jsonData
-			}
-		}
-	}
-}
-
-// extractUpdateDescription populates the UpdateDescription from the raw
-// change event's "updateDescription" field.
-func extractUpdateDescription(raw bson.D, event *ChangeEvent) {
-	updateDesc, ok := bsonDLookup(raw, "updateDescription").(bson.D)
-	if !ok {
-		return
-	}
-	event.UpdateDesc = &UpdateDescription{}
-	if updated, ok := bsonDLookup(updateDesc, "updatedFields").(bson.D); ok {
-		event.UpdateDesc.UpdatedFields = bsonDToMap(updated)
-	}
-	if removed, ok := bsonDLookup(updateDesc, "removedFields").(bson.A); ok {
-		for _, f := range removed {
-			if s, ok := f.(string); ok {
-				event.UpdateDesc.RemovedFields = append(event.UpdateDesc.RemovedFields, s)
-			}
-		}
-	}
-	if truncated, ok := bsonDLookup(updateDesc, "truncatedArrays").(bson.A); ok {
-		for _, f := range truncated {
-			if ta, ok := f.(bson.D); ok {
-				if field, ok := bsonDLookup(ta, "field").(string); ok {
-					event.UpdateDesc.TruncatedArrays = append(event.UpdateDesc.TruncatedArrays, field)
-				}
-			}
-		}
-	}
-}
-
-// extractTimestamp populates the event timestamp from the raw change event's
-// "clusterTime" field.
-func extractTimestamp(raw bson.D, event *ChangeEvent) {
-	if ts, ok := bsonDLookup(raw, "clusterTime").(bson.Timestamp); ok {
-		event.Timestamp = time.Unix(int64(ts.T), 0)
-	}
 }
 
 // formatDocumentKey converts any MongoDB _id type to a string representation.

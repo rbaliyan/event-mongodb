@@ -14,6 +14,22 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo"
 )
 
+// toChangeStreamDoc converts a bson.D (test data) to changeStreamDoc.
+// This helper allows tests to define input as bson.D (easier to write)
+// while testing the struct-based extraction.
+func toChangeStreamDoc(t *testing.T, raw bson.D) changeStreamDoc {
+	t.Helper()
+	data, err := bson.Marshal(raw)
+	if err != nil {
+		t.Fatalf("failed to marshal bson.D: %v", err)
+	}
+	var doc changeStreamDoc
+	if err := bson.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("failed to unmarshal to changeStreamDoc: %v", err)
+	}
+	return doc
+}
+
 // --- validate() tests ---
 
 func TestValidate(t *testing.T) {
@@ -417,7 +433,7 @@ func TestExtractChangeEvent(t *testing.T) {
 			{Key: "clusterTime", Value: bson.Timestamp{T: 1705300200, I: 1}},
 		}
 
-		event := tr.extractChangeEvent(raw)
+		event := tr.extractChangeEvent(toChangeStreamDoc(t, raw))
 
 		if event.ID != "resume-token-123" {
 			t.Errorf("ID = %q, want resume-token-123", event.ID)
@@ -461,7 +477,7 @@ func TestExtractChangeEvent(t *testing.T) {
 			}},
 		}
 
-		event := tr.extractChangeEvent(raw)
+		event := tr.extractChangeEvent(toChangeStreamDoc(t, raw))
 
 		if event.OperationType != OperationUpdate {
 			t.Errorf("OperationType = %q, want update", event.OperationType)
@@ -501,7 +517,7 @@ func TestExtractChangeEvent(t *testing.T) {
 			{Key: "documentKey", Value: bson.D{{Key: "_id", Value: oid}}},
 		}
 
-		event := tr.extractChangeEvent(raw)
+		event := tr.extractChangeEvent(toChangeStreamDoc(t, raw))
 
 		if event.OperationType != OperationDelete {
 			t.Errorf("OperationType = %q, want delete", event.OperationType)
@@ -519,7 +535,7 @@ func TestExtractChangeEvent(t *testing.T) {
 			{Key: "operationType", Value: "insert"},
 		}
 
-		event := tr.extractChangeEvent(raw)
+		event := tr.extractChangeEvent(toChangeStreamDoc(t, raw))
 
 		// ID should be auto-generated
 		if event.ID == "" {
@@ -1269,7 +1285,7 @@ func TestExtractChangeEvent_EdgeCases(t *testing.T) {
 
 	t.Run("empty raw document", func(t *testing.T) {
 		raw := bson.D{}
-		ev := tr.extractChangeEvent(raw)
+		ev := tr.extractChangeEvent(toChangeStreamDoc(t, raw))
 		// Should not panic, ID should be auto-generated
 		if ev.ID == "" {
 			t.Error("expected auto-generated ID")
@@ -1283,7 +1299,7 @@ func TestExtractChangeEvent_EdgeCases(t *testing.T) {
 		raw := bson.D{
 			{Key: "ns", Value: bson.D{{Key: "db", Value: "mydb"}}},
 		}
-		ev := tr.extractChangeEvent(raw)
+		ev := tr.extractChangeEvent(toChangeStreamDoc(t, raw))
 		if ev.Database != "mydb" {
 			t.Errorf("Database = %q, want mydb", ev.Database)
 		}
@@ -1297,7 +1313,7 @@ func TestExtractChangeEvent_EdgeCases(t *testing.T) {
 		raw := bson.D{
 			{Key: "clusterTime", Value: ts},
 		}
-		ev := tr.extractChangeEvent(raw)
+		ev := tr.extractChangeEvent(toChangeStreamDoc(t, raw))
 		if ev.Timestamp.Unix() != 1700000000 {
 			t.Errorf("Timestamp unix = %d, want 1700000000", ev.Timestamp.Unix())
 		}
@@ -1307,7 +1323,7 @@ func TestExtractChangeEvent_EdgeCases(t *testing.T) {
 		raw := bson.D{
 			{Key: "documentKey", Value: bson.D{{Key: "_id", Value: int32(42)}}},
 		}
-		ev := tr.extractChangeEvent(raw)
+		ev := tr.extractChangeEvent(toChangeStreamDoc(t, raw))
 		if ev.DocumentKey != "42" {
 			t.Errorf("DocumentKey = %q, want 42", ev.DocumentKey)
 		}
@@ -1317,7 +1333,7 @@ func TestExtractChangeEvent_EdgeCases(t *testing.T) {
 		raw := bson.D{
 			{Key: "documentKey", Value: bson.D{{Key: "_id", Value: int64(999)}}},
 		}
-		ev := tr.extractChangeEvent(raw)
+		ev := tr.extractChangeEvent(toChangeStreamDoc(t, raw))
 		if ev.DocumentKey != "999" {
 			t.Errorf("DocumentKey = %q, want 999", ev.DocumentKey)
 		}
@@ -1330,7 +1346,7 @@ func TestExtractChangeEvent_EdgeCases(t *testing.T) {
 				{Key: "removedFields", Value: bson.A{}},
 			}},
 		}
-		ev := tr.extractChangeEvent(raw)
+		ev := tr.extractChangeEvent(toChangeStreamDoc(t, raw))
 		if ev.UpdateDesc == nil {
 			t.Fatal("UpdateDesc should not be nil")
 		}
