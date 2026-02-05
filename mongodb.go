@@ -288,8 +288,8 @@ type transportOptions struct {
 	resumeTokenStore         ResumeTokenStore
 	resumeTokenID            string
 	ackStore                 AckStore
-	disableResume            bool
-	startFromBeginning       bool
+	disableResume  bool
+	startFromPast  time.Duration // If > 0, start from this duration in the past when no resume token exists
 	pipeline                 mongo.Pipeline
 	fullDocument             FullDocumentOption
 	batchSize                *int32
@@ -312,10 +312,11 @@ type Transport struct {
 	registeredEvents sync.Map           // map[string]struct{} - tracks registered event names
 
 	// Watcher state
-	watcherOnce   sync.Once
-	watcherCtx    context.Context
-	watcherCancel context.CancelFunc
-	watcherWg     sync.WaitGroup
+	watcherOnce        sync.Once
+	watcherCtx         context.Context
+	watcherCancel      context.CancelFunc
+	watcherWg          sync.WaitGroup
+	startFromPastTried int32 // Atomic flag: 1 if startFromPast was tried (prevents infinite retry on oplog too short)
 }
 
 // Option configures the MongoDB transport.
@@ -432,8 +433,8 @@ func WithResumeTokenID(id string) Option {
 	}
 }
 
-// WithStartFromBeginning configures the transport to start from the oldest
-// available position in the oplog when no resume token exists (first start).
+// WithStartFromPast configures the transport to start from a specified duration
+// in the past when no resume token exists (first start).
 //
 // Default behavior (without this option):
 //   - On first start, the change stream starts from the CURRENT position
@@ -441,30 +442,34 @@ func WithResumeTokenID(id string) Option {
 //   - Historical changes in the oplog are skipped
 //
 // With this option:
-//   - On first start, the change stream starts from the BEGINNING of the oplog
-//   - All available historical changes are processed first
-//   - Useful for backfilling or ensuring no events are missed on initial deployment
+//   - On first start, the change stream starts from the specified duration ago
+//   - Historical changes within that window are processed first
+//   - Useful for processing existing data or recovering missed events
 //
-// Note: The oplog is a capped collection with limited retention (typically hours
-// to days depending on cluster activity). This option only processes changes
-// still in the oplog window, not the entire collection history.
+// This option only affects the first start (when no resume token exists).
+// Subsequent restarts resume from the stored token as normal.
 //
-// This option has no effect when:
-//   - A valid resume token exists (normal resume behavior)
-//   - WithoutResume() is also set (no token storage)
+// The duration should be within the oplog retention window (typically 24-72 hours
+// on MongoDB Atlas). If the specified time is before the oplog window, MongoDB
+// will return ChangeStreamHistoryLost and the transport will fall back to
+// starting from the current position.
+//
+// WARNING: Starting from the past may process a large number of events.
+// Ensure your handlers are idempotent as events may be reprocessed on restart.
 //
 // Example:
 //
-//	// Process all available oplog history on first start
+//	// Start from 24 hours ago on first start
 //	mongodb.New(db,
 //	    mongodb.WithCollection("orders"),
-//	    mongodb.WithStartFromBeginning(),
+//	    mongodb.WithStartFromPast(24 * time.Hour),
 //	)
-func WithStartFromBeginning() Option {
+func WithStartFromPast(d time.Duration) Option {
 	return func(o *transportOptions) {
-		o.startFromBeginning = true
+		o.startFromPast = d
 	}
 }
+
 
 // WithAckStore sets the store for tracking acknowledgments.
 // This enables at-least-once delivery semantics.
@@ -796,7 +801,8 @@ func (t *Transport) isOpen() bool {
 	return atomic.LoadInt32(&t.status) == statusOpen
 }
 
-// RegisterEvent creates resources for an event and starts watching.
+// RegisterEvent creates resources for an event.
+// The change stream watcher is started lazily when the first subscriber is added.
 func (t *Transport) RegisterEvent(ctx context.Context, name string) error {
 	if !t.isOpen() {
 		return transport.ErrTransportClosed
@@ -810,8 +816,8 @@ func (t *Transport) RegisterEvent(ctx context.Context, name string) error {
 	// Track registered event name
 	t.registeredEvents.Store(name, struct{}{})
 
-	// Start the change stream watcher if not already running
-	t.startWatcher()
+	// Note: watcher is started in Subscribe() to avoid race condition where
+	// historical events (from WithStartFromPast) are dropped before subscribers exist.
 
 	t.logger.Debug("registered event", "event", name, "collection", t.collectionName)
 	return nil
@@ -870,6 +876,39 @@ func (t *Transport) Subscribe(ctx context.Context, name string, opts ...transpor
 
 	t.logger.Debug("added subscriber", "event", name, "subscriber", sub.ID())
 	return sub, nil
+}
+
+// Start begins watching the MongoDB change stream.
+// Call this method AFTER all subscribers have been registered to ensure
+// no events are dropped. This is especially important when using
+// WithStartFromPast, which replays historical events on startup.
+//
+// If Start is not called explicitly, the watcher will not start automatically.
+// This gives the application explicit control over when to begin processing events.
+//
+// Example:
+//
+//	// Create transport
+//	t, _ := mongodb.New(db,
+//	    mongodb.WithCollection("orders"),
+//	    mongodb.WithStartFromPast(8 * time.Hour),
+//	)
+//
+//	// Register events and subscribers on bus
+//	bus, _ := event.NewBus("app", event.WithTransport(t))
+//	orderEvent := event.New[Order]("order.created")
+//	bus.Register(ctx, orderEvent)
+//	orderEvent.Subscribe(ctx, handler)
+//
+//	// NOW start watching - all subscribers are ready
+//	t.Start(ctx)
+func (t *Transport) Start(ctx context.Context) error {
+	if !t.isOpen() {
+		return transport.ErrTransportClosed
+	}
+	t.startWatcher()
+	t.logger.Info("change stream watcher started")
+	return nil
 }
 
 // Close shuts down the transport.
@@ -995,17 +1034,33 @@ func (t *Transport) startWatcher() {
 
 // watchLoop continuously watches the change stream with reconnection.
 func (t *Transport) watchLoop(ctx context.Context) {
+	t.logger.Info("watchLoop started")
+	defer t.logger.Info("watchLoop exited")
+
 	backoff := base.NewBackoff()
+	iteration := 0
 
 	for {
+		iteration++
+		t.logger.Debug("watchLoop iteration starting", "iteration", iteration)
+
 		select {
 		case <-ctx.Done():
+			t.logger.Info("watchLoop context done, exiting", "error", ctx.Err())
 			return
 		default:
 		}
 
-		if err := t.watchOnce(ctx, backoff.Reset); err != nil {
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		err := t.watchOnce(ctx, backoff.Reset)
+		t.logger.Debug("watchOnce returned", "iteration", iteration, "error", err)
+
+		if err != nil {
+			// Only exit if the parent context is done.
+			// Don't use errors.Is(err, context.DeadlineExceeded) because MongoDB driver
+			// wraps context.DeadlineExceeded for per-operation timeouts, which should
+			// be retried, not cause exit.
+			if ctx.Err() != nil {
+				t.logger.Info("watchLoop parent context done, exiting", "ctx_error", ctx.Err())
 				return
 			}
 
@@ -1017,9 +1072,9 @@ func (t *Transport) watchLoop(ctx context.Context) {
 				"error", err, "backoff", backoffDuration)
 
 			// Check if this is a ChangeStreamHistoryLost error
-			// This means the resume token points to a position no longer in the oplog
+			// This means the resume token or start time points to a position no longer in the oplog
 			if isChangeStreamHistoryLost(err) {
-				t.logger.Warn("resume token is stale (oplog rolled past), clearing and starting fresh")
+				t.logger.Warn("oplog does not contain requested position, clearing and starting fresh")
 				if t.resumeTokenStore != nil {
 					resumeKey := t.resumeTokenKey()
 					clearCtx, clearCancel := context.WithTimeout(context.Background(), detachedTimeout)
@@ -1095,15 +1150,18 @@ func (t *Transport) watchOnce(ctx context.Context, onConnected func()) error {
 		}
 	}
 
-	// When startFromBeginning is enabled and no existing token, set startAtOperationTime
-	// to the earliest possible timestamp. MongoDB will adjust to the earliest available
-	// position in the oplog if this timestamp is before the oplog window.
-	if !hasExistingToken && t.startFromBeginning {
-		// Use timestamp 1 - MongoDB will either start from the earliest oplog entry
-		// or return ChangeStreamHistoryLost if the oplog doesn't go back that far,
-		// which we handle in the retry logic.
-		csOpts.SetStartAtOperationTime(&bson.Timestamp{T: 1, I: 0})
-		t.logger.Info("starting from beginning of oplog (no resume token, startFromBeginning enabled)", "key", resumeKey)
+	// When startFromPast is configured and no existing token, set startAtOperationTime
+	// to start from the specified duration in the past.
+	// Use atomic flag to ensure we only try once - if oplog doesn't go back far enough,
+	// we fall back to current position on retry.
+	if !hasExistingToken && t.startFromPast > 0 && atomic.CompareAndSwapInt32(&t.startFromPastTried, 0, 1) {
+		startTime := time.Now().Add(-t.startFromPast)
+		// Convert to MongoDB Timestamp (seconds since Unix epoch in T field)
+		csOpts.SetStartAtOperationTime(&bson.Timestamp{T: uint32(startTime.Unix()), I: 0})
+		t.logger.Info("starting from past (no resume token)",
+			"key", resumeKey,
+			"start_time", startTime,
+			"duration_ago", t.startFromPast)
 	}
 
 	// Open change stream based on watch level
@@ -1137,8 +1195,9 @@ func (t *Transport) watchOnce(ctx context.Context, onConnected func()) error {
 
 	// Handle first-time start (no existing token).
 	// Default: save current position to skip historical oplog events.
-	// With startFromBeginning: process all available oplog history.
-	if !hasExistingToken && t.resumeTokenStore != nil && !t.startFromBeginning {
+	// With startFromPast: process historical events, don't save initial position.
+	startedFromPast := t.startFromPast > 0 && atomic.LoadInt32(&t.startFromPastTried) == 1
+	if !hasExistingToken && t.resumeTokenStore != nil && !startedFromPast {
 		// Get a single event to establish our position, or use current token.
 		// We need to call TryNext to get a resume token without blocking.
 		if cs.TryNext(ctx) {
@@ -1161,18 +1220,26 @@ func (t *Transport) watchOnce(ctx context.Context, onConnected func()) error {
 			}
 		}
 	}
-	// Note: startFromBeginning case is handled above before opening the change stream
+	// Note: startFromPast case is handled above before opening the change stream
 
 	// Process changes
 	connected := false
 	lastTokenSave := time.Now()
 	var pendingToken bson.Raw
+	eventCount := 0
+	t.logger.Debug("entering change stream loop")
 	for cs.Next(ctx) {
+		eventCount++
 		if err := t.processChange(ctx, cs); err != nil {
-			t.logger.Error("failed to process change", "error", err)
+			t.logger.Error("failed to process change", "event_count", eventCount, "error", err)
 			t.onError(err)
 			// Skip resume token save on failure to allow reprocessing
 			continue
+		}
+
+		// Log periodic progress
+		if eventCount%100 == 0 {
+			t.logger.Info("change stream progress", "events_processed", eventCount)
 		}
 
 		// Signal successful processing so caller can reset backoff
@@ -1197,6 +1264,13 @@ func (t *Transport) watchOnce(ctx context.Context, onConnected func()) error {
 		}
 	}
 
+	// Log why we exited the loop
+	csErr := cs.Err()
+	t.logger.Info("change stream loop exited",
+		"events_processed", eventCount,
+		"cs_error", csErr,
+		"ctx_error", ctx.Err())
+
 	// Flush any pending resume token before exiting so we don't lose
 	// progress when the change stream closes cleanly or on error.
 	if t.resumeTokenStore != nil && pendingToken != nil {
@@ -1205,7 +1279,7 @@ func (t *Transport) watchOnce(ctx context.Context, onConnected func()) error {
 		}
 	}
 
-	return cs.Err()
+	return csErr
 }
 
 // saveResumeToken persists a resume token using a detached context so the
@@ -1274,6 +1348,12 @@ func (t *Transport) processChange(ctx context.Context, cs changeStream) error {
 	// Extract change event data
 	changeEvent := t.extractChangeEvent(raw)
 
+	t.logger.Debug("change event received",
+		"operation", changeEvent.OperationType,
+		"database", changeEvent.Database,
+		"collection", changeEvent.Collection,
+		"document_key", changeEvent.DocumentKey)
+
 	// Discard empty updates unless explicitly included
 	if !t.emptyUpdates && isEmptyUpdate(changeEvent) {
 		t.logger.Debug("skipping empty update event",
@@ -1288,6 +1368,10 @@ func (t *Transport) processChange(ctx context.Context, cs changeStream) error {
 		return err
 	}
 	if payload == nil {
+		t.logger.Debug("skipping event with nil payload",
+			"operation", changeEvent.OperationType,
+			"database", changeEvent.Database,
+			"collection", changeEvent.Collection)
 		return nil // Event was skipped (e.g., no fullDocument)
 	}
 
@@ -1296,7 +1380,20 @@ func (t *Transport) processChange(ctx context.Context, cs changeStream) error {
 	msg := t.buildMessage(changeEvent, payload, metadata)
 
 	// Store as pending and publish
-	return t.storeAndPublish(changeEvent, msg)
+	t.logger.Debug("publishing change event",
+		"operation", changeEvent.OperationType,
+		"database", changeEvent.Database,
+		"collection", changeEvent.Collection,
+		"document_key", changeEvent.DocumentKey)
+
+	err = t.storeAndPublish(changeEvent, msg)
+	if err != nil {
+		t.logger.Error("storeAndPublish failed",
+			"operation", changeEvent.OperationType,
+			"document_key", changeEvent.DocumentKey,
+			"error", err)
+	}
+	return err
 }
 
 // buildPayload creates the event payload based on transport mode.
@@ -1415,17 +1512,25 @@ func (t *Transport) storeAndPublish(event ChangeEvent, msg transport.Message) er
 	defer publishCancel()
 
 	var publishErr error
+	var publishCount int
 	t.registeredEvents.Range(func(key, value any) bool {
 		eventName, ok := key.(string)
 		if !ok {
 			return true
 		}
+		publishCount++
 		if err := t.channelTransport.Publish(publishCtx, eventName, msg); err != nil {
 			t.logger.Warn("failed to publish to channel transport", "event", eventName, "error", err)
 			publishErr = errors.Join(publishErr, fmt.Errorf("publish to %s: %w", eventName, err))
+		} else {
+			t.logger.Debug("published to channel transport", "event", eventName, "msg_id", msg.ID())
 		}
 		return true
 	})
+
+	if publishCount == 0 {
+		t.logger.Warn("storeAndPublish: no registered events to publish to")
+	}
 
 	return publishErr
 }
