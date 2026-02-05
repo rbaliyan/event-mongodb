@@ -162,9 +162,20 @@ Metadata keys are exported constants: `MetadataUpdatedFields`, `MetadataRemovedF
 ### Resume Token Handling
 
 - Key format: `"namespace:resumeTokenID"` (e.g., `"mydb.orders:hostname"`)
-- Auto-saves after each processed change
+- Auto-saves after each processed change (throttled to every 5 seconds)
 - Clears stale tokens on `ChangeStreamHistoryLost` error
-- First start saves initial position to avoid processing historical oplog
+- Default: First start saves initial position to skip historical oplog
+
+**Resume Token Options:**
+- `WithStartFromBeginning()`: On first start (no token), process all available oplog history instead of starting from current position
+- `WithoutResume()`: Disable resume token persistence entirely
+- `WithResumeTokenID(id)`: Set custom ID for token key (default: hostname)
+- `WithResumeTokenStore(store)`: Use custom storage backend
+- `WithResumeTokenCollection(db, name)`: Store tokens in specific collection
+
+**Resume Token Methods:**
+- `ResetResumeToken(ctx)`: Clear stored token so next restart starts fresh
+- `ResumeTokenKey()`: Get the storage key for this transport's token
 
 ### Resume Token Saves
 

@@ -289,6 +289,7 @@ type transportOptions struct {
 	resumeTokenID            string
 	ackStore                 AckStore
 	disableResume            bool
+	startFromBeginning       bool
 	pipeline                 mongo.Pipeline
 	fullDocument             FullDocumentOption
 	batchSize                *int32
@@ -428,6 +429,40 @@ func WithoutResume() Option {
 func WithResumeTokenID(id string) Option {
 	return func(o *transportOptions) {
 		o.resumeTokenID = id
+	}
+}
+
+// WithStartFromBeginning configures the transport to start from the oldest
+// available position in the oplog when no resume token exists (first start).
+//
+// Default behavior (without this option):
+//   - On first start, the change stream starts from the CURRENT position
+//   - Only new changes (after startup) are processed
+//   - Historical changes in the oplog are skipped
+//
+// With this option:
+//   - On first start, the change stream starts from the BEGINNING of the oplog
+//   - All available historical changes are processed first
+//   - Useful for backfilling or ensuring no events are missed on initial deployment
+//
+// Note: The oplog is a capped collection with limited retention (typically hours
+// to days depending on cluster activity). This option only processes changes
+// still in the oplog window, not the entire collection history.
+//
+// This option has no effect when:
+//   - A valid resume token exists (normal resume behavior)
+//   - WithoutResume() is also set (no token storage)
+//
+// Example:
+//
+//	// Process all available oplog history on first start
+//	mongodb.New(db,
+//	    mongodb.WithCollection("orders"),
+//	    mongodb.WithStartFromBeginning(),
+//	)
+func WithStartFromBeginning() Option {
+	return func(o *transportOptions) {
+		o.startFromBeginning = true
 	}
 }
 
@@ -856,6 +891,47 @@ func (t *Transport) Close(ctx context.Context) error {
 	return nil
 }
 
+// ResetResumeToken clears the stored resume token for this transport.
+// After calling this method, the next restart will start from:
+//   - The beginning of the oplog (if WithStartFromBeginning was set)
+//   - The current position (default behavior)
+//
+// This is useful when:
+//   - The resume token has become stale (oplog has rotated past it)
+//   - You want to reprocess events from a fresh position
+//   - Troubleshooting change stream issues
+//
+// Note: This only clears the token in storage. The currently running
+// change stream continues from its current position until restarted.
+// To apply the reset, restart the transport after calling this method.
+//
+// Example:
+//
+//	// Clear stale token and restart
+//	if err := transport.ResetResumeToken(ctx); err != nil {
+//	    log.Printf("failed to reset token: %v", err)
+//	}
+//	// Restart the application to start fresh
+func (t *Transport) ResetResumeToken(ctx context.Context) error {
+	if t.resumeTokenStore == nil {
+		return nil // No token store configured
+	}
+
+	resumeKey := t.resumeTokenKey()
+	if err := t.resumeTokenStore.Save(ctx, resumeKey, nil); err != nil {
+		return fmt.Errorf("failed to clear resume token %s: %w", resumeKey, err)
+	}
+
+	t.logger.Info("resume token cleared", "key", resumeKey)
+	return nil
+}
+
+// ResumeTokenKey returns the key used for storing this transport's resume token.
+// This can be useful for external monitoring or manual token management.
+func (t *Transport) ResumeTokenKey() string {
+	return t.resumeTokenKey()
+}
+
 // Health performs a health check.
 func (t *Transport) Health(ctx context.Context) *transport.HealthCheckResult {
 	start := time.Now()
@@ -1048,9 +1124,10 @@ func (t *Transport) watchOnce(ctx context.Context, onConnected func()) error {
 		cs.Close(closeCtx)
 	}()
 
-	// If no existing token, save the current position and start from here.
-	// This prevents processing historical oplog events on first start.
-	if !hasExistingToken && t.resumeTokenStore != nil {
+	// Handle first-time start (no existing token).
+	// Default: save current position to skip historical oplog events.
+	// With startFromBeginning: process all available oplog history.
+	if !hasExistingToken && t.resumeTokenStore != nil && !t.startFromBeginning {
 		// Get a single event to establish our position, or use current token.
 		// We need to call TryNext to get a resume token without blocking.
 		if cs.TryNext(ctx) {
@@ -1072,6 +1149,8 @@ func (t *Transport) watchOnce(ctx context.Context, onConnected func()) error {
 				t.logger.Info("saved initial resume token, starting from current position", "key", resumeKey)
 			}
 		}
+	} else if !hasExistingToken && t.startFromBeginning {
+		t.logger.Info("starting from beginning of oplog (no resume token, startFromBeginning enabled)", "key", resumeKey)
 	}
 
 	// Process changes

@@ -12,6 +12,7 @@ go get github.com/rbaliyan/event-mongodb
 
 - Watch MongoDB change streams at collection, database, or cluster level
 - Resume token persistence for reliable resumption after restarts
+- Resume token reset and start-from-beginning options for recovery
 - Acknowledgment tracking for at-least-once delivery
 - Automatic reconnection with exponential backoff
 - Full document lookup for update events
@@ -156,7 +157,32 @@ t, _ := mongodb.New(db,
     mongodb.WithCollection("orders"),
     mongodb.WithoutResume(),
 )
+
+// Start from beginning of oplog on first start (process all available history)
+t, _ := mongodb.New(db,
+    mongodb.WithCollection("orders"),
+    mongodb.WithStartFromBeginning(),
+)
 ```
+
+#### Resetting Resume Tokens
+
+When a resume token becomes stale (oplog has rotated past the stored position), you can reset it:
+
+```go
+// Clear the stored resume token
+if err := transport.ResetResumeToken(ctx); err != nil {
+    log.Printf("failed to reset token: %v", err)
+}
+
+// Get the token key for monitoring/debugging
+key := transport.ResumeTokenKey()
+fmt.Printf("Token key: %s\n", key)
+```
+
+After resetting, the next restart will:
+- Start from the beginning of oplog (if `WithStartFromBeginning` was set)
+- Start from the current position (default behavior)
 
 ### Full Document Options
 
