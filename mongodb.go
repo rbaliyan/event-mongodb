@@ -1239,7 +1239,7 @@ func (t *Transport) buildFullDocumentPayload(doc changeStreamDoc, event ChangeEv
 	contentType := "application/bson"
 
 	// Send the raw fullDocument BSON - preserves all MongoDB types
-	if doc.FullDocument != nil && len(doc.FullDocument) > 0 {
+	if len(doc.FullDocument) > 0 {
 		// FullDocument is already bson.Raw, just return it directly
 		return []byte(doc.FullDocument), contentType, nil
 	}
@@ -1384,7 +1384,7 @@ func (t *Transport) extractChangeEvent(doc changeStreamDoc) ChangeEvent {
 	}
 
 	// Extract full document as JSON
-	if doc.FullDocument != nil && len(doc.FullDocument) > 0 {
+	if len(doc.FullDocument) > 0 {
 		var fullDoc bson.D
 		if err := bson.Unmarshal(doc.FullDocument, &fullDoc); err == nil {
 			if jsonData, err := bsonDToJSON(fullDoc); err == nil {

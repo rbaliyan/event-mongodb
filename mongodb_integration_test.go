@@ -37,7 +37,7 @@ func setupIntegrationTest(t *testing.T) (*mongo.Client, *mongo.Database, func())
 
 	if err := client.Ping(ctx, nil); err != nil {
 		cancel()
-		client.Disconnect(ctx)
+		_ = client.Disconnect(ctx)
 		t.Skipf("MongoDB not available: %v", err)
 	}
 
@@ -45,7 +45,7 @@ func setupIntegrationTest(t *testing.T) (*mongo.Client, *mongo.Database, func())
 	var result bson.M
 	if err := client.Database("admin").RunCommand(ctx, bson.M{"replSetGetStatus": 1}).Decode(&result); err != nil {
 		cancel()
-		client.Disconnect(ctx)
+		_ = client.Disconnect(ctx)
 		t.Skipf("MongoDB replica set not available: %v", err)
 	}
 
@@ -53,8 +53,8 @@ func setupIntegrationTest(t *testing.T) (*mongo.Client, *mongo.Database, func())
 	db := client.Database(dbName)
 
 	cleanup := func() {
-		db.Drop(context.Background())
-		client.Disconnect(context.Background())
+		_ = db.Drop(context.Background())
+		_ = client.Disconnect(context.Background())
 		cancel()
 	}
 
@@ -446,9 +446,15 @@ func TestIntegration_DatabaseLevelWatch(t *testing.T) {
 	time.Sleep(500 * time.Millisecond)
 
 	// Insert into different collections
-	db.Collection("orders").InsertOne(ctx, bson.M{"type": "order"})
-	db.Collection("products").InsertOne(ctx, bson.M{"type": "product"})
-	db.Collection("users").InsertOne(ctx, bson.M{"type": "user"})
+	if _, err := db.Collection("orders").InsertOne(ctx, bson.M{"type": "order"}); err != nil {
+		t.Fatalf("InsertOne(orders) error: %v", err)
+	}
+	if _, err := db.Collection("products").InsertOne(ctx, bson.M{"type": "product"}); err != nil {
+		t.Fatalf("InsertOne(products) error: %v", err)
+	}
+	if _, err := db.Collection("users").InsertOne(ctx, bson.M{"type": "user"}); err != nil {
+		t.Fatalf("InsertOne(users) error: %v", err)
+	}
 
 	// Wait for events
 	deadline := time.Now().Add(10 * time.Second)

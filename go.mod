@@ -2,6 +2,8 @@ module github.com/rbaliyan/event-mongodb
 
 go 1.24.0
 
+toolchain go1.24.13
+
 require (
 	github.com/rbaliyan/event/v3 v3.7.11
 	go.mongodb.org/mongo-driver/v2 v2.5.0

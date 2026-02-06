@@ -17,13 +17,13 @@ func testMetrics(t *testing.T) (*Metrics, *sdkmetric.ManualReader) {
 	t.Helper()
 	reader := sdkmetric.NewManualReader()
 	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
-	t.Cleanup(func() { provider.Shutdown(context.Background()) })
+	t.Cleanup(func() { _ = provider.Shutdown(context.Background()) })
 
 	m, err := NewMetrics(WithMeterProvider(provider))
 	if err != nil {
 		t.Fatalf("NewMetrics: %v", err)
 	}
-	t.Cleanup(func() { m.Close() })
+	t.Cleanup(func() { _ = m.Close() })
 	return m, reader
 }
 
@@ -283,13 +283,13 @@ func TestMetricsMiddleware_ErrorClassification(t *testing.T) {
 			// Create fresh metrics for each subtest
 			subReader := sdkmetric.NewManualReader()
 			subProvider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(subReader))
-			t.Cleanup(func() { subProvider.Shutdown(context.Background()) })
+			t.Cleanup(func() { _ = subProvider.Shutdown(context.Background()) })
 
 			subM, err := NewMetrics(WithMeterProvider(subProvider))
 			if err != nil {
 				t.Fatalf("NewMetrics: %v", err)
 			}
-			t.Cleanup(func() { subM.Close() })
+			t.Cleanup(func() { _ = subM.Close() })
 
 			middleware := MetricsMiddleware[ChangeEvent](subM)
 			handler := middleware(func(ctx context.Context, ev event.Event[ChangeEvent], data ChangeEvent) error {
@@ -444,13 +444,13 @@ func TestMetricsMiddleware_Attributes(t *testing.T) {
 func TestNewMetrics_WithNamespace(t *testing.T) {
 	reader := sdkmetric.NewManualReader()
 	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
-	t.Cleanup(func() { provider.Shutdown(context.Background()) })
+	t.Cleanup(func() { _ = provider.Shutdown(context.Background()) })
 
 	m, err := NewMetrics(WithMeterProvider(provider), WithMetricsNamespace("orders"))
 	if err != nil {
 		t.Fatalf("NewMetrics: %v", err)
 	}
-	t.Cleanup(func() { m.Close() })
+	t.Cleanup(func() { _ = m.Close() })
 
 	middleware := MetricsMiddleware[ChangeEvent](m)
 	handler := middleware(func(ctx context.Context, ev event.Event[ChangeEvent], data ChangeEvent) error {

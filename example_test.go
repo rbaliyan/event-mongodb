@@ -41,7 +41,7 @@ func Example() {
 		fmt.Println("Connect error:", err)
 		return
 	}
-	defer client.Disconnect(ctx)
+	defer func() { _ = client.Disconnect(ctx) }()
 
 	db := client.Database("myapp")
 
@@ -98,7 +98,7 @@ func Example_basic() {
 	ctx := context.Background()
 
 	client, _ := mongo.Connect(options.Client().ApplyURI("mongodb://localhost:27017"))
-	defer client.Disconnect(ctx)
+	defer func() { _ = client.Disconnect(ctx) }()
 
 	db := client.Database("myapp")
 
@@ -113,9 +113,9 @@ func Example_basic() {
 	defer bus.Close(ctx)
 
 	orderChanges := event.New[mongodb.ChangeEvent]("order.changes")
-	event.Register(ctx, bus, orderChanges)
+	_ = event.Register(ctx, bus, orderChanges)
 
-	orderChanges.Subscribe(ctx, func(ctx context.Context, ev event.Event[mongodb.ChangeEvent], change mongodb.ChangeEvent) error {
+	_ = orderChanges.Subscribe(ctx, func(ctx context.Context, ev event.Event[mongodb.ChangeEvent], change mongodb.ChangeEvent) error {
 		fmt.Printf("Change: %s %s\n", change.OperationType, change.DocumentKey)
 		return nil
 	})
@@ -132,7 +132,7 @@ func Example_withResumeToken() {
 	ctx := context.Background()
 
 	client, _ := mongo.Connect(options.Client().ApplyURI("mongodb://localhost:27017"))
-	defer client.Disconnect(ctx)
+	defer func() { _ = client.Disconnect(ctx) }()
 
 	db := client.Database("myapp")
 	internalDB := client.Database("myapp_internal")
@@ -182,7 +182,7 @@ func Example_withAckStore() {
 	ctx := context.Background()
 
 	client, _ := mongo.Connect(options.Client().ApplyURI("mongodb://localhost:27017"))
-	defer client.Disconnect(ctx)
+	defer func() { _ = client.Disconnect(ctx) }()
 
 	db := client.Database("myapp")
 	internalDB := client.Database("myapp_internal")
@@ -195,7 +195,7 @@ func Example_withAckStore() {
 	)
 
 	// Create indexes for efficient queries and TTL-based cleanup
-	ackStore.CreateIndexes(ctx)
+	_ = ackStore.CreateIndexes(ctx)
 
 	// Create transport with ack store
 	transport, _ := mongodb.New(db,
@@ -219,7 +219,7 @@ func Example_withPipeline() {
 	ctx := context.Background()
 
 	client, _ := mongo.Connect(options.Client().ApplyURI("mongodb://localhost:27017"))
-	defer client.Disconnect(ctx)
+	defer func() { _ = client.Disconnect(ctx) }()
 
 	db := client.Database("myapp")
 
@@ -276,7 +276,7 @@ func Example_fullDocumentOnly() {
 	ctx := context.Background()
 
 	client, _ := mongo.Connect(options.Client().ApplyURI("mongodb://localhost:27017"))
-	defer client.Disconnect(ctx)
+	defer func() { _ = client.Disconnect(ctx) }()
 
 	db := client.Database("myapp")
 
@@ -294,9 +294,9 @@ func Example_fullDocumentOnly() {
 	// Subscribe with your document type directly
 	// No need for mongodb.ChangeEvent wrapper
 	orderEvent := event.New[Order]("order.changes")
-	event.Register(ctx, bus, orderEvent)
+	_ = event.Register(ctx, bus, orderEvent)
 
-	orderEvent.Subscribe(ctx, func(ctx context.Context, ev event.Event[Order], order Order) error {
+	_ = orderEvent.Subscribe(ctx, func(ctx context.Context, ev event.Event[Order], order Order) error {
 		// Access order fields directly
 		fmt.Printf("Order %s: %s ($%.2f)\n",
 			order.ID.Hex(),
@@ -319,7 +319,7 @@ func Example_watchLevels() {
 	ctx := context.Background()
 
 	client, _ := mongo.Connect(options.Client().ApplyURI("mongodb://localhost:27017"))
-	defer client.Disconnect(ctx)
+	defer func() { _ = client.Disconnect(ctx) }()
 
 	db := client.Database("myapp")
 
@@ -360,7 +360,7 @@ func Example_withDistributed() {
 	ctx := context.Background()
 
 	client, _ := mongo.Connect(options.Client().ApplyURI("mongodb://localhost:27017"))
-	defer client.Disconnect(ctx)
+	defer func() { _ = client.Disconnect(ctx) }()
 
 	db := client.Database("myapp")
 	internalDB := client.Database("myapp_internal")
@@ -372,7 +372,7 @@ func Example_withDistributed() {
 		WithCompletedTTL(24 * time.Hour)       // Remember completed messages for 24h
 
 	// Create TTL index for automatic cleanup
-	claimer.EnsureIndexes(ctx)
+	_ = claimer.EnsureIndexes(ctx)
 
 	// Create transport and bus
 	transport, _ := mongodb.New(db,
@@ -384,7 +384,7 @@ func Example_withDistributed() {
 	defer bus.Close(ctx)
 
 	orderChanges := event.New[mongodb.ChangeEvent]("order.changes")
-	event.Register(ctx, bus, orderChanges)
+	_ = event.Register(ctx, bus, orderChanges)
 
 	// Claim TTL should exceed your handler's maximum processing time
 	// If a worker holds a message longer than this, it's considered orphaned
@@ -395,7 +395,7 @@ func Example_withDistributed() {
 	// 1. Atomic claiming (only one worker processes each message)
 	// 2. Completion tracking (prevents reprocessing)
 	// 3. Failure handling (releases claim for retry on error)
-	orderChanges.Subscribe(ctx, func(ctx context.Context, ev event.Event[mongodb.ChangeEvent], change mongodb.ChangeEvent) error {
+	_ = orderChanges.Subscribe(ctx, func(ctx context.Context, ev event.Event[mongodb.ChangeEvent], change mongodb.ChangeEvent) error {
 		fmt.Printf("Processing: %s %s\n", change.OperationType, change.DocumentKey)
 
 		// Your business logic here
@@ -433,7 +433,7 @@ func Example_withIdempotency() {
 	ctx := context.Background()
 
 	client, _ := mongo.Connect(options.Client().ApplyURI("mongodb://localhost:27017"))
-	defer client.Disconnect(ctx)
+	defer func() { _ = client.Disconnect(ctx) }()
 
 	db := client.Database("myapp")
 
@@ -453,10 +453,10 @@ func Example_withIdempotency() {
 	defer bus.Close(ctx)
 
 	orderChanges := event.New[mongodb.ChangeEvent]("order.changes")
-	event.Register(ctx, bus, orderChanges)
+	_ = event.Register(ctx, bus, orderChanges)
 
 	// Subscribe with idempotency check in the handler
-	orderChanges.Subscribe(ctx, func(ctx context.Context, ev event.Event[mongodb.ChangeEvent], change mongodb.ChangeEvent) error {
+	_ = orderChanges.Subscribe(ctx, func(ctx context.Context, ev event.Event[mongodb.ChangeEvent], change mongodb.ChangeEvent) error {
 		// Use the change event ID as the idempotency key
 		// This ID is unique per change event
 		messageID := change.ID
@@ -498,7 +498,7 @@ func Example_completeSetup() {
 	ctx := context.Background()
 
 	client, _ := mongo.Connect(options.Client().ApplyURI("mongodb://localhost:27017"))
-	defer client.Disconnect(ctx)
+	defer func() { _ = client.Disconnect(ctx) }()
 
 	db := client.Database("myapp")
 	internalDB := client.Database("myapp_internal")
@@ -508,13 +508,13 @@ func Example_completeSetup() {
 		internalDB.Collection("_event_acks"),
 		24*time.Hour,
 	)
-	ackStore.CreateIndexes(ctx)
+	_ = ackStore.CreateIndexes(ctx)
 
 	// 2. Claimer for WorkerPool emulation
 	claimer := distributed.NewMongoStateManager(internalDB).
 		WithCollection("_order_worker_claims").
 		WithCompletedTTL(24 * time.Hour)
-	claimer.EnsureIndexes(ctx)
+	_ = claimer.EnsureIndexes(ctx)
 
 	// 3. Idempotency store for deduplication
 	idempotencyStore := idempotency.NewMemoryStore(7 * 24 * time.Hour)
@@ -539,12 +539,12 @@ func Example_completeSetup() {
 	defer bus.Close(ctx)
 
 	orderChanges := event.New[mongodb.ChangeEvent]("order.changes")
-	event.Register(ctx, bus, orderChanges)
+	_ = event.Register(ctx, bus, orderChanges)
 
 	// 6. Handler with full middleware stack
 	claimTTL := 5 * time.Minute
 
-	orderChanges.Subscribe(ctx, func(ctx context.Context, ev event.Event[mongodb.ChangeEvent], change mongodb.ChangeEvent) error {
+	_ = orderChanges.Subscribe(ctx, func(ctx context.Context, ev event.Event[mongodb.ChangeEvent], change mongodb.ChangeEvent) error {
 		// Additional idempotency check
 		messageID := change.ID
 		isDuplicate, _ := idempotencyStore.IsDuplicate(ctx, messageID)
@@ -556,7 +556,7 @@ func Example_completeSetup() {
 		fmt.Printf("Processing: %s %s\n", change.OperationType, change.DocumentKey)
 
 		// Mark processed
-		idempotencyStore.MarkProcessed(ctx, messageID)
+		_ = idempotencyStore.MarkProcessed(ctx, messageID)
 		return nil
 	}, event.WithMiddleware(
 		distributed.WorkerPoolMiddleware[mongodb.ChangeEvent](claimer, claimTTL),

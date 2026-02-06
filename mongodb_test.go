@@ -1383,7 +1383,7 @@ func TestNewMongoResumeTokenStore(t *testing.T) {
 func TestNewMongoAckStore(t *testing.T) {
 	store := NewMongoAckStore(nil, 24*time.Hour)
 	if store == nil {
-		t.Error("expected non-nil store")
+		t.Fatal("expected non-nil store")
 	}
 	if store.ttl != 24*time.Hour {
 		t.Errorf("ttl = %v, want 24h", store.ttl)
