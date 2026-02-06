@@ -70,6 +70,10 @@ build:
 tidy:
     go mod tidy
 
+# Format code
+fmt:
+    go fmt ./...
+
 # Run linter
 lint:
     golangci-lint run ./...
@@ -81,6 +85,14 @@ clean: mongo-stop
 # Build examples
 examples:
     go build -o bin/main examples/main.go
+
+# Run vulnerability check
+vulncheck:
+    go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+# Check for outdated dependencies
+depcheck:
+    go list -m -u all | grep '\[' || echo "All dependencies are up to date"
 
 # Create and push a new release tag (bumps patch version)
 release:
