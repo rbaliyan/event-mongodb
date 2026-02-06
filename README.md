@@ -1,5 +1,9 @@
 # event-mongodb
 
+[![CI](https://github.com/rbaliyan/event-mongodb/actions/workflows/ci.yml/badge.svg)](https://github.com/rbaliyan/event-mongodb/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/rbaliyan/event-mongodb.svg)](https://pkg.go.dev/github.com/rbaliyan/event-mongodb)
+[![Go Report Card](https://goreportcard.com/badge/github.com/rbaliyan/event-mongodb)](https://goreportcard.com/report/github.com/rbaliyan/event-mongodb)
+
 MongoDB Change Stream transport for the [event](https://github.com/rbaliyan/event) library.
 
 ## Installation
