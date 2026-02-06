@@ -1270,8 +1270,8 @@ func (t *Transport) watchOnce(ctx context.Context, onConnected func()) error {
 			continue
 		}
 
-		// Log periodic progress
-		if eventCount%100 == 0 {
+		// Log periodic progress (every 10000 events to reduce log noise at high throughput)
+		if eventCount%10000 == 0 {
 			t.logger.Info("change stream progress", "events_processed", eventCount)
 		}
 
