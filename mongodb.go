@@ -72,30 +72,6 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
-// Errors returned by the MongoDB transport.
-var (
-	// ErrClientRequired is returned by NewClusterWatch when client is nil.
-	ErrClientRequired = errors.New("mongodb client is required")
-
-	// ErrDatabaseRequired is returned by New when database is nil.
-	ErrDatabaseRequired = errors.New("mongodb database is required")
-
-	// ErrPublishNotSupported is returned by Publish on every call. The MongoDB
-	// change stream transport is subscribe-only: events are produced by writing
-	// to the database, not by calling Publish. Code that uses the generic
-	// transport.Transport interface should check for this error with
-	// errors.Is(err, mongodb.ErrPublishNotSupported) and handle it accordingly.
-	ErrPublishNotSupported = errors.New("mongodb transport does not support Publish; changes are triggered by database writes")
-
-	// ErrMaxUpdatedFieldsSizeRequiresFull is returned by New when
-	// WithMaxUpdatedFieldsSize is used without WithFullDocument.
-	ErrMaxUpdatedFieldsSizeRequiresFull = errors.New("WithMaxUpdatedFieldsSize requires WithFullDocument to fall back to full document when updated fields exceed the limit")
-
-	// ErrFullDocumentRequired is returned by New when WithFullDocumentOnly
-	// is used without WithFullDocument.
-	ErrFullDocumentRequired = errors.New("WithFullDocumentOnly requires WithFullDocument to populate the payload")
-)
-
 // Transport status constants
 const (
 	statusClosed int32 = 0
