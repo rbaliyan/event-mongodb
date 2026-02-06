@@ -14,7 +14,7 @@ import (
 
 // checkpointDoc represents the MongoDB document structure for checkpoints.
 type checkpointDoc struct {
-	ID         string    `bson:"_id"`        // Composite key: eventName:consumerID
+	ID         string    `bson:"_id"` // Composite key: eventName:consumerID
 	EventName  string    `bson:"event_name"`
 	ConsumerID string    `bson:"consumer_id"`
 	Checkpoint string    `bson:"checkpoint"` // Last processed sequence ID
@@ -160,7 +160,7 @@ func (s *CheckpointStore) List(ctx context.Context, eventName string) (map[strin
 	if err != nil {
 		return nil, fmt.Errorf("list checkpoints: %w", err)
 	}
-	defer cursor.Close(ctx)
+	defer func() { _ = cursor.Close(ctx) }()
 
 	checkpoints := make(map[string]string)
 	for cursor.Next(ctx) {

@@ -39,13 +39,13 @@ const (
 // storedMessage represents the MongoDB document structure for messages.
 type storedMessage struct {
 	ID         bson.ObjectID `bson:"_id"`
-	EventName  string             `bson:"event_name"`
-	Data       []byte             `bson:"data"`
-	Status     string             `bson:"status"`
-	Timestamp  time.Time          `bson:"timestamp"`
-	RetryCount int                `bson:"retry_count"`
-	InflightAt time.Time          `bson:"inflight_at,omitempty"`
-	AckedAt    time.Time          `bson:"acked_at,omitempty"`
+	EventName  string        `bson:"event_name"`
+	Data       []byte        `bson:"data"`
+	Status     string        `bson:"status"`
+	Timestamp  time.Time     `bson:"timestamp"`
+	RetryCount int           `bson:"retry_count"`
+	InflightAt time.Time     `bson:"inflight_at,omitempty"`
+	AckedAt    time.Time     `bson:"acked_at,omitempty"`
 }
 
 // Store implements persistent.Store using MongoDB.
@@ -385,7 +385,7 @@ func (s *Store) GetStats(ctx context.Context, eventName string) (*Stats, error) 
 	if err != nil {
 		return nil, fmt.Errorf("aggregate stats: %w", err)
 	}
-	defer cursor.Close(ctx)
+	defer func() { _ = cursor.Close(ctx) }()
 
 	stats := &Stats{}
 	for cursor.Next(ctx) {

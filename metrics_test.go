@@ -100,8 +100,8 @@ func testContext(clusterTime time.Time, operation, namespace string) context.Con
 // stubEvent implements event.Event[T] for testing.
 type stubEvent[T any] struct{}
 
-func (stubEvent[T]) Name() string                                                              { return "test-event" }
-func (stubEvent[T]) Publish(_ context.Context, _ T) error                                      { return nil }
+func (stubEvent[T]) Name() string                         { return "test-event" }
+func (stubEvent[T]) Publish(_ context.Context, _ T) error { return nil }
 func (stubEvent[T]) Subscribe(_ context.Context, _ event.Handler[T], _ ...event.SubscribeOption[T]) error {
 	return nil
 }

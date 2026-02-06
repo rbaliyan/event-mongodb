@@ -114,7 +114,7 @@ func TestValidate(t *testing.T) {
 
 func TestIsEmptyUpdate(t *testing.T) {
 	tests := []struct {
-		name string
+		name  string
 		event ChangeEvent
 		want  bool
 	}{
@@ -1208,11 +1208,11 @@ func TestBsonDToJSON(t *testing.T) {
 func TestErrorValues(t *testing.T) {
 	// Verify error messages are meaningful
 	errors := map[string]error{
-		"ErrClientRequired":                    ErrClientRequired,
-		"ErrDatabaseRequired":                  ErrDatabaseRequired,
-		"ErrPublishNotSupported":               ErrPublishNotSupported,
-		"ErrMaxUpdatedFieldsSizeRequiresFull":   ErrMaxUpdatedFieldsSizeRequiresFull,
-		"ErrFullDocumentRequired":              ErrFullDocumentRequired,
+		"ErrClientRequired":                   ErrClientRequired,
+		"ErrDatabaseRequired":                 ErrDatabaseRequired,
+		"ErrPublishNotSupported":              ErrPublishNotSupported,
+		"ErrMaxUpdatedFieldsSizeRequiresFull": ErrMaxUpdatedFieldsSizeRequiresFull,
+		"ErrFullDocumentRequired":             ErrFullDocumentRequired,
 	}
 	for name, err := range errors {
 		if err == nil {
@@ -1400,4 +1400,3 @@ func TestDefaultResumeTokenCollectionValue(t *testing.T) {
 		t.Errorf("defaultResumeTokenCollection = %q, want _event_resume_tokens", defaultResumeTokenCollection)
 	}
 }
-

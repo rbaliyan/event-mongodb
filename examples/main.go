@@ -33,11 +33,11 @@ import (
 // Order represents an order document in the orders collection.
 type Order struct {
 	ID         bson.ObjectID `bson:"_id,omitempty" json:"id"`
-	CustomerID string             `bson:"customer_id" json:"customer_id"`
-	Product    string             `bson:"product" json:"product"`
-	Amount     float64            `bson:"amount" json:"amount"`
-	Status     string             `bson:"status" json:"status"`
-	CreatedAt  time.Time          `bson:"created_at" json:"created_at"`
+	CustomerID string        `bson:"customer_id" json:"customer_id"`
+	Product    string        `bson:"product" json:"product"`
+	Amount     float64       `bson:"amount" json:"amount"`
+	Status     string        `bson:"status" json:"status"`
+	CreatedAt  time.Time     `bson:"created_at" json:"created_at"`
 }
 
 func main() {
@@ -88,7 +88,7 @@ func runBasicExample() {
 	if err != nil {
 		log.Fatal("Failed to connect:", err)
 	}
-	defer client.Disconnect(ctx)
+	defer func() { _ = client.Disconnect(ctx) }()
 
 	db := client.Database("myapp")
 
@@ -109,7 +109,7 @@ func runBasicExample() {
 	if err != nil {
 		log.Fatal("Failed to create bus:", err)
 	}
-	defer bus.Close(ctx)
+	defer func() { _ = bus.Close(ctx) }()
 
 	// Define and register an event for order changes
 	// Using mongodb.ChangeEvent gives you full change event details
@@ -189,7 +189,7 @@ func runWorkerPoolExample() {
 	if err != nil {
 		log.Fatal("Failed to connect:", err)
 	}
-	defer client.Disconnect(ctx)
+	defer func() { _ = client.Disconnect(ctx) }()
 
 	db := client.Database("myapp")
 	internalDB := client.Database("myapp_internal")
@@ -199,7 +199,7 @@ func runWorkerPoolExample() {
 	// ensuring only one worker processes each message.
 	claimer := distributed.NewMongoStateManager(internalDB).
 		WithCollection("_order_worker_claims"). // Custom collection for this worker group
-		WithCompletedTTL(24 * time.Hour)       // Remember completed messages for 24h
+		WithCompletedTTL(24 * time.Hour)        // Remember completed messages for 24h
 
 	// Create necessary indexes for TTL-based cleanup
 	if err := claimer.EnsureIndexes(ctx); err != nil {
@@ -219,7 +219,7 @@ func runWorkerPoolExample() {
 	if err != nil {
 		log.Fatal("Failed to create bus:", err)
 	}
-	defer bus.Close(ctx)
+	defer func() { _ = bus.Close(ctx) }()
 
 	// Register event
 	orderChanges := event.New[mongodb.ChangeEvent]("order.changes")
@@ -306,7 +306,7 @@ func runIdempotencyExample() {
 	if err != nil {
 		log.Fatal("Failed to connect:", err)
 	}
-	defer client.Disconnect(ctx)
+	defer func() { _ = client.Disconnect(ctx) }()
 
 	db := client.Database("myapp")
 
@@ -329,7 +329,7 @@ func runIdempotencyExample() {
 	if err != nil {
 		log.Fatal("Failed to create bus:", err)
 	}
-	defer bus.Close(ctx)
+	defer func() { _ = bus.Close(ctx) }()
 
 	// Register event
 	orderChanges := event.New[mongodb.ChangeEvent]("order.changes")
@@ -408,7 +408,7 @@ func runFullSetupExample() {
 	if err != nil {
 		log.Fatal("Failed to connect:", err)
 	}
-	defer client.Disconnect(ctx)
+	defer func() { _ = client.Disconnect(ctx) }()
 
 	db := client.Database("myapp")
 	internalDB := client.Database("myapp_internal") // Separate DB for internal state
@@ -486,7 +486,7 @@ func runFullSetupExample() {
 	if err != nil {
 		log.Fatal("Failed to create bus:", err)
 	}
-	defer bus.Close(ctx)
+	defer func() { _ = bus.Close(ctx) }()
 
 	orderChanges := event.New[mongodb.ChangeEvent]("order.changes")
 	if err := event.Register(ctx, bus, orderChanges); err != nil {

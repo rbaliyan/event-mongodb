@@ -113,8 +113,8 @@ type transportOptions struct {
 	resumeTokenStore         ResumeTokenStore
 	resumeTokenID            string
 	ackStore                 AckStore
-	disableResume  bool
-	startFromPast  time.Duration // If > 0, start from this duration in the past when no resume token exists
+	disableResume            bool
+	startFromPast            time.Duration // If > 0, start from this duration in the past when no resume token exists
 	pipeline                 mongo.Pipeline
 	fullDocument             FullDocumentOption
 	batchSize                *int32
@@ -130,8 +130,8 @@ type Transport struct {
 	transportOptions // Embedded configuration from Option functions
 
 	status           int32
-	client           *mongo.Client      // For cluster-level watch
-	db               *mongo.Database    // For database/collection-level watch
+	client           *mongo.Client   // For cluster-level watch
+	db               *mongo.Database // For database/collection-level watch
 	level            watchLevel
 	channelTransport *channel.Transport // Internal channel transport for fan-out
 	registeredEvents sync.Map           // map[string]struct{} - tracks registered event names
@@ -294,7 +294,6 @@ func WithStartFromPast(d time.Duration) Option {
 		o.startFromPast = d
 	}
 }
-
 
 // WithAckStore sets the store for tracking acknowledgments.
 // This enables at-least-once delivery semantics.
@@ -1015,7 +1014,7 @@ func (t *Transport) watchOnce(ctx context.Context, onConnected func()) error {
 	defer func() {
 		closeCtx, closeCancel := context.WithTimeout(context.Background(), detachedTimeout)
 		defer closeCancel()
-		cs.Close(closeCtx)
+		_ = cs.Close(closeCtx)
 	}()
 
 	// Handle first-time start (no existing token).
@@ -1396,8 +1395,8 @@ func (t *Transport) extractChangeEvent(doc changeStreamDoc) ChangeEvent {
 	// Extract update description
 	if doc.UpdateDesc != nil {
 		event.UpdateDesc = &UpdateDescription{
-			UpdatedFields:   bsonDToMap(doc.UpdateDesc.UpdatedFields),
-			RemovedFields:   doc.UpdateDesc.RemovedFields,
+			UpdatedFields: bsonDToMap(doc.UpdateDesc.UpdatedFields),
+			RemovedFields: doc.UpdateDesc.RemovedFields,
 		}
 		for _, ta := range doc.UpdateDesc.TruncatedArrays {
 			event.UpdateDesc.TruncatedArrays = append(event.UpdateDesc.TruncatedArrays, ta.Field)

@@ -1,6 +1,6 @@
 // Package mongodb provides MongoDB Change Stream transport for the event library.
 //
-// Error Handling
+// # Error Handling
 //
 // This package defines sentinel errors for common failure conditions.
 // Use errors.Is() to check for specific error types:

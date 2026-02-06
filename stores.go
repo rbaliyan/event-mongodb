@@ -178,7 +178,7 @@ func (s *MongoAckStore) List(ctx context.Context, filter AckFilter) ([]AckEntry,
 	if err != nil {
 		return nil, err
 	}
-	defer cursor.Close(ctx)
+	defer func() { _ = cursor.Close(ctx) }()
 
 	var entries []AckEntry
 	for cursor.Next(ctx) {

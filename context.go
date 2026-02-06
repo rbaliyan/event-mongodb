@@ -9,13 +9,13 @@ import (
 
 // Metadata keys for event context.
 const (
-	MetadataContentType  = "Content-Type"
-	MetadataOperation    = "operation"
-	MetadataDatabase     = "database"
-	MetadataCollection   = "collection"
-	MetadataNamespace    = "namespace"
-	MetadataDocumentKey  = "document_key"
-	MetadataClusterTime  = "cluster_time"
+	MetadataContentType   = "Content-Type"
+	MetadataOperation     = "operation"
+	MetadataDatabase      = "database"
+	MetadataCollection    = "collection"
+	MetadataNamespace     = "namespace"
+	MetadataDocumentKey   = "document_key"
+	MetadataClusterTime   = "cluster_time"
 	MetadataUpdatedFields = "updated_fields"
 	MetadataRemovedFields = "removed_fields"
 )

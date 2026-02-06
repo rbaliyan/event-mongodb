@@ -17,10 +17,10 @@ import (
 // Order represents an order document.
 type Order struct {
 	ID         bson.ObjectID `bson:"_id,omitempty" json:"id"`
-	CustomerID string             `bson:"customer_id" json:"customer_id"`
-	Product    string             `bson:"product" json:"product"`
-	Amount     float64            `bson:"amount" json:"amount"`
-	Status     string             `bson:"status" json:"status"`
+	CustomerID string        `bson:"customer_id" json:"customer_id"`
+	Product    string        `bson:"product" json:"product"`
+	Amount     float64       `bson:"amount" json:"amount"`
+	Status     string        `bson:"status" json:"status"`
 }
 
 // Example demonstrates basic usage of the MongoDB change stream transport.
@@ -369,7 +369,7 @@ func Example_withDistributed() {
 	// Uses MongoDB's atomic findOneAndUpdate for race-condition-free coordination
 	claimer := distributed.NewMongoStateManager(internalDB).
 		WithCollection("_order_worker_claims"). // Custom collection name
-		WithCompletedTTL(24 * time.Hour)       // Remember completed messages for 24h
+		WithCompletedTTL(24 * time.Hour)        // Remember completed messages for 24h
 
 	// Create TTL index for automatic cleanup
 	_ = claimer.EnsureIndexes(ctx)

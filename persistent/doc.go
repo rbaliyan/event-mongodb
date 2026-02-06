@@ -70,13 +70,13 @@
 //
 // Messages go through the following states:
 //
-//	pending -> inflight -> acked
-//	    ^          |
-//	    +---nack---+
+//		pending -> inflight -> acked
+//		    ^          |
+//		    +---nack---+
 //
-//   - pending: Message is stored and waiting to be processed
-//   - inflight: Message has been fetched and is being processed
-//   - acked: Message was successfully processed
+//	  - pending: Message is stored and waiting to be processed
+//	  - inflight: Message has been fetched and is being processed
+//	  - acked: Message was successfully processed
 //
 // If a message is not acknowledged within the visibility timeout (default 5min),
 // it returns to "pending" state and can be fetched again.
