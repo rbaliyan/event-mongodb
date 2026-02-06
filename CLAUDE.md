@@ -187,6 +187,51 @@ Resume token saves use a detached context (`context.WithTimeout(context.Backgrou
 - Connection errors: Exponential backoff with reconnection
 - Processing errors: Logged but continues to next change
 
+### Resume Token Recovery
+
+Resume tokens allow the transport to resume watching from where it left off after a restart. However, if the oplog no longer contains the position referenced by the token, a `ChangeStreamHistoryLost` error occurs and the token is automatically cleared.
+
+**When tokens become invalid:**
+- MongoDB's oplog window expires (typically 24-72 hours)
+- Service was offline longer than the oplog retention period
+- Token was saved but event processing failed before oplog was consumed
+
+**Automatic recovery:**
+The transport automatically handles `ChangeStreamHistoryLost` by clearing the stored token and restarting from the current oplog position. Some events may be missed in this scenario.
+
+**Manual token reset:**
+Use the `ResetResumeToken(ctx)` method to clear the stored token:
+```go
+if err := transport.ResetResumeToken(ctx); err != nil {
+    log.Error("failed to reset token", "error", err)
+}
+```
+
+**Direct MongoDB token operations:**
+
+Resume tokens are stored in the `_event_resume_tokens_GLOBAL` collection in the `event_internal` database by default. The key format is `*.*:{resumeTokenID}:{collection}`.
+
+```javascript
+// Check stored tokens
+db.getCollection("_event_resume_tokens_GLOBAL").find({});
+
+// Delete token for a specific collection
+db.getCollection("_event_resume_tokens_GLOBAL").deleteMany({_id: /collection_name/});
+
+// Delete all tokens
+db.getCollection("_event_resume_tokens_GLOBAL").deleteMany({});
+```
+
+**WithStartFromPast behavior:**
+The `WithStartFromPast(duration)` option only applies on FIRST start (when no resume token exists). On subsequent restarts, the transport resumes from the saved token position. To reprocess historical events:
+1. Call `ResetResumeToken(ctx)` or delete the token from MongoDB
+2. Restart the service
+
+**Recommended monitoring:**
+- Monitor for `ChangeStreamHistoryLost` errors in logs
+- Alert when oplog lag approaches retention period
+- Track `mongodb_oplog_lag_seconds` metric for early warning
+
 ## Design Patterns
 
 ### Functional Options
