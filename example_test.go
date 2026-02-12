@@ -367,9 +367,10 @@ func Example_withDistributed() {
 
 	// Create claimer for worker coordination
 	// Uses MongoDB's atomic findOneAndUpdate for race-condition-free coordination
-	claimer := distributed.NewMongoStateManager(internalDB).
-		WithCollection("_order_worker_claims"). // Custom collection name
-		WithCompletedTTL(24 * time.Hour)        // Remember completed messages for 24h
+	claimer := distributed.NewMongoStateManager(internalDB,
+		distributed.WithCollection("_order_worker_claims"), // Custom collection name
+		distributed.WithCompletedTTL(24*time.Hour),        // Remember completed messages for 24h
+	)
 
 	// Create TTL index for automatic cleanup
 	_ = claimer.EnsureIndexes(ctx)
@@ -511,9 +512,10 @@ func Example_completeSetup() {
 	_ = ackStore.CreateIndexes(ctx)
 
 	// 2. Claimer for WorkerPool emulation
-	claimer := distributed.NewMongoStateManager(internalDB).
-		WithCollection("_order_worker_claims").
-		WithCompletedTTL(24 * time.Hour)
+	claimer := distributed.NewMongoStateManager(internalDB,
+		distributed.WithCollection("_order_worker_claims"),
+		distributed.WithCompletedTTL(24*time.Hour),
+	)
 	_ = claimer.EnsureIndexes(ctx)
 
 	// 3. Idempotency store for deduplication

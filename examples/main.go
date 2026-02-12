@@ -197,9 +197,10 @@ func runWorkerPoolExample() {
 	// Create a claimer for worker coordination
 	// The claimer uses MongoDB for atomic claim acquisition,
 	// ensuring only one worker processes each message.
-	claimer := distributed.NewMongoStateManager(internalDB).
-		WithCollection("_order_worker_claims"). // Custom collection for this worker group
-		WithCompletedTTL(24 * time.Hour)        // Remember completed messages for 24h
+	claimer := distributed.NewMongoStateManager(internalDB,
+		distributed.WithCollection("_order_worker_claims"), // Custom collection for this worker group
+		distributed.WithCompletedTTL(24*time.Hour),        // Remember completed messages for 24h
+	)
 
 	// Create necessary indexes for TTL-based cleanup
 	if err := claimer.EnsureIndexes(ctx); err != nil {
@@ -429,9 +430,10 @@ func runFullSetupExample() {
 	// -------------------------------------------------------------------------
 	// Step 2: Set up claimer for WorkerPool emulation
 	// -------------------------------------------------------------------------
-	claimer := distributed.NewMongoStateManager(internalDB).
-		WithCollection("_order_worker_claims").
-		WithCompletedTTL(24 * time.Hour)
+	claimer := distributed.NewMongoStateManager(internalDB,
+		distributed.WithCollection("_order_worker_claims"),
+		distributed.WithCompletedTTL(24*time.Hour),
+	)
 	if err := claimer.EnsureIndexes(ctx); err != nil {
 		log.Fatal("Failed to create claim indexes:", err)
 	}

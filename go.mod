@@ -5,7 +5,7 @@ go 1.24.0
 toolchain go1.24.13
 
 require (
-	github.com/rbaliyan/event/v3 v3.7.12-0.20260210061344-97cbe3cd87c6
+	github.com/rbaliyan/event/v3 v3.8.0
 	go.mongodb.org/mongo-driver/v2 v2.5.0
 	go.opentelemetry.io/otel v1.40.0
 	go.opentelemetry.io/otel/metric v1.40.0

@@ -1519,8 +1519,13 @@ func isEmptyUpdate(e ChangeEvent) bool {
 	return len(e.UpdateDesc.UpdatedFields) == 0 && len(e.UpdateDesc.RemovedFields) == 0
 }
 
+// SupportsRedelivery returns false because MongoDB Change Streams are
+// broadcast-only with no built-in re-delivery of unacknowledged messages.
+func (t *Transport) SupportsRedelivery() bool { return false }
+
 // Compile-time checks
 var (
 	_ transport.Transport     = (*Transport)(nil)
 	_ transport.HealthChecker = (*Transport)(nil)
+	_ transport.Redeliverable = (*Transport)(nil)
 )
