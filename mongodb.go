@@ -595,10 +595,13 @@ func (t *Transport) init() error {
 		return err
 	}
 
-	// Create internal channel transport for fan-out
+	// Create internal channel transport for fan-out.
+	// Use a 5-minute fallback timeout to give MongoDB CS handlers generous
+	// backpressure tolerance instead of the default 30s.
 	t.channelTransport = channel.New(
 		channel.WithBufferSize(uint(t.bufferSize)),
 		channel.WithLogger(t.logger),
+		channel.WithFallbackTimeout(5*time.Minute),
 	)
 
 	// Default resume token ID to hostname
