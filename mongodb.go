@@ -207,7 +207,11 @@ func WithResumeTokenStore(store ResumeTokenStore) Option {
 //	)
 func WithResumeTokenCollection(db *mongo.Database, collectionName string) Option {
 	return func(o *transportOptions) {
-		o.resumeTokenStore = NewMongoResumeTokenStore(db.Collection(collectionName))
+		store, err := NewMongoResumeTokenStore(db.Collection(collectionName))
+		if err != nil {
+			return // nil collection handled during Open() validation
+		}
+		o.resumeTokenStore = store
 	}
 }
 
@@ -615,7 +619,11 @@ func (t *Transport) init() error {
 
 	// Auto-create resume token store if not disabled and not provided
 	if !t.disableResume && t.resumeTokenStore == nil {
-		t.resumeTokenStore = NewMongoResumeTokenStore(t.db.Collection(defaultResumeTokenCollection))
+		store, err := NewMongoResumeTokenStore(t.db.Collection(defaultResumeTokenCollection))
+		if err != nil {
+			return fmt.Errorf("create resume token store: %w", err)
+		}
+		t.resumeTokenStore = store
 		t.logger.Debug("using default resume token collection",
 			"database", t.db.Name(),
 			"collection", defaultResumeTokenCollection)

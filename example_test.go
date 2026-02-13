@@ -189,10 +189,14 @@ func Example_withAckStore() {
 
 	// Create an acknowledgment store
 	// TTL controls how long acknowledged events are remembered
-	ackStore := mongodb.NewMongoAckStore(
+	ackStore, err := mongodb.NewMongoAckStore(
 		internalDB.Collection("_event_acks"),
 		24*time.Hour, // Keep acknowledged events for 24 hours
 	)
+	if err != nil {
+		fmt.Println("Error:", err)
+		return
+	}
 
 	// Create indexes for efficient queries and TTL-based cleanup
 	_ = ackStore.CreateIndexes(ctx)
@@ -505,10 +509,14 @@ func Example_completeSetup() {
 	internalDB := client.Database("myapp_internal")
 
 	// 1. Acknowledgment store for at-least-once delivery
-	ackStore := mongodb.NewMongoAckStore(
+	ackStore, err := mongodb.NewMongoAckStore(
 		internalDB.Collection("_event_acks"),
 		24*time.Hour,
 	)
+	if err != nil {
+		fmt.Println("Error:", err)
+		return
+	}
 	_ = ackStore.CreateIndexes(ctx)
 
 	// 2. Claimer for WorkerPool emulation

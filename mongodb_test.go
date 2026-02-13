@@ -1370,24 +1370,23 @@ func TestStoreInterfaceCompliance(t *testing.T) {
 // --- NewMongoResumeTokenStore constructor ---
 
 func TestNewMongoResumeTokenStore(t *testing.T) {
-	// Can only verify the constructor does not panic with a nil collection
-	// (actual operations would fail, but construction should work)
-	store := NewMongoResumeTokenStore(nil)
-	if store == nil {
-		t.Error("expected non-nil store")
-	}
+	t.Run("nil collection returns error", func(t *testing.T) {
+		_, err := NewMongoResumeTokenStore(nil)
+		if err == nil {
+			t.Error("expected error for nil collection")
+		}
+	})
 }
 
 // --- NewMongoAckStore constructor ---
 
 func TestNewMongoAckStore(t *testing.T) {
-	store := NewMongoAckStore(nil, 24*time.Hour)
-	if store == nil {
-		t.Fatal("expected non-nil store")
-	}
-	if store.ttl != 24*time.Hour {
-		t.Errorf("ttl = %v, want 24h", store.ttl)
-	}
+	t.Run("nil collection returns error", func(t *testing.T) {
+		_, err := NewMongoAckStore(nil, 24*time.Hour)
+		if err == nil {
+			t.Error("expected error for nil collection")
+		}
+	})
 }
 
 // --- defaultResumeTokenCollection constant ---
