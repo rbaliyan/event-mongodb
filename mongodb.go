@@ -477,11 +477,8 @@ func WithMaxUpdatedFieldsSize(bytes int) Option {
 //	t, err := mongodb.New(db,
 //	    mongodb.WithFullDocument(mongodb.FullDocumentUpdateLookup),
 //	)
-func New(db *mongo.Database, opts ...Option) (*Transport, error) {
-	if db == nil {
-		return nil, ErrDatabaseRequired
-	}
-
+// defaultOptions returns a transportOptions with default values applied.
+func defaultOptions(opts []Option) transportOptions {
 	o := transportOptions{
 		logger:     transport.Logger("transport>mongodb"),
 		onError:    func(error) {},
@@ -490,6 +487,15 @@ func New(db *mongo.Database, opts ...Option) (*Transport, error) {
 	for _, opt := range opts {
 		opt(&o)
 	}
+	return o
+}
+
+func New(db *mongo.Database, opts ...Option) (*Transport, error) {
+	if db == nil {
+		return nil, ErrDatabaseRequired
+	}
+
+	o := defaultOptions(opts)
 
 	watchCtx, watchCancel := context.WithCancel(context.Background())
 
@@ -544,14 +550,7 @@ func NewClusterWatch(client *mongo.Client, opts ...Option) (*Transport, error) {
 		return nil, ErrClientRequired
 	}
 
-	o := transportOptions{
-		logger:     transport.Logger("transport>mongodb"),
-		onError:    func(error) {},
-		bufferSize: 100,
-	}
-	for _, opt := range opts {
-		opt(&o)
-	}
+	o := defaultOptions(opts)
 
 	// Use "admin" database for storing resume tokens
 	adminDB := client.Database("admin")

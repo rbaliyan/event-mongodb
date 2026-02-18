@@ -69,16 +69,22 @@ type Store struct {
 	visibilityTimeout time.Duration
 }
 
+// storeOptions holds configuration for the MongoDB store.
+type storeOptions struct {
+	ttl               time.Duration
+	visibilityTimeout time.Duration
+}
+
 // StoreOption configures the MongoDB store.
-type StoreOption func(*Store)
+type StoreOption func(*storeOptions)
 
 // WithTTL sets the TTL for acknowledged messages.
 // MongoDB will automatically delete acked messages after this duration.
 // Default is 0 (no automatic deletion).
 func WithTTL(ttl time.Duration) StoreOption {
-	return func(s *Store) {
+	return func(o *storeOptions) {
 		if ttl > 0 {
-			s.ttl = ttl
+			o.ttl = ttl
 		}
 	}
 }
@@ -87,9 +93,9 @@ func WithTTL(ttl time.Duration) StoreOption {
 // If not Acked within this time, another Fetch can claim it.
 // Default is 5 minutes.
 func WithVisibilityTimeout(d time.Duration) StoreOption {
-	return func(s *Store) {
+	return func(o *storeOptions) {
 		if d > 0 {
-			s.visibilityTimeout = d
+			o.visibilityTimeout = d
 		}
 	}
 }
@@ -116,12 +122,16 @@ func NewStore(collection *mongo.Collection, opts ...StoreOption) (*Store, error)
 		return nil, ErrCollectionRequired
 	}
 
-	s := &Store{
-		collection:        collection,
+	o := storeOptions{
 		visibilityTimeout: defaultVisibilityTimeout,
 	}
 	for _, opt := range opts {
-		opt(s)
+		opt(&o)
+	}
+	s := &Store{
+		collection:        collection,
+		ttl:               o.ttl,
+		visibilityTimeout: o.visibilityTimeout,
 	}
 	return s, nil
 }

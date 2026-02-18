@@ -21,6 +21,9 @@ import (
 	eventerrors "github.com/rbaliyan/event/v3/errors"
 )
 
+// ErrCollectionNil is returned when a nil collection is passed to a store constructor.
+var ErrCollectionNil = fmt.Errorf("mongodb: collection must not be nil: %w", eventerrors.ErrInvalidArgument)
+
 // Sentinel errors for the MongoDB transport.
 var (
 	// ErrClientRequired is returned by NewClusterWatch when client is nil.
@@ -49,13 +52,3 @@ var (
 	ErrFullDocumentRequired = fmt.Errorf("WithFullDocumentOnly requires WithFullDocument: %w", eventerrors.ErrInvalidArgument)
 )
 
-// IsInvalidArgument checks if an error indicates an invalid argument.
-// This is useful for checking if any of the argument validation errors occurred.
-func IsInvalidArgument(err error) bool {
-	return eventerrors.IsInvalidArgument(err)
-}
-
-// IsPublishNotSupported checks if an error indicates publish is not supported.
-func IsPublishNotSupported(err error) bool {
-	return errors.Is(err, ErrPublishNotSupported)
-}

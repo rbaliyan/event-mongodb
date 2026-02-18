@@ -3,7 +3,6 @@ package mongodb
 import (
 	"context"
 	"errors"
-	"fmt"
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -35,7 +34,7 @@ type resumeTokenDoc struct {
 //	)
 func NewMongoResumeTokenStore(collection *mongo.Collection) (*MongoResumeTokenStore, error) {
 	if collection == nil {
-		return nil, fmt.Errorf("mongodb: collection must not be nil")
+		return nil, ErrCollectionNil
 	}
 	return &MongoResumeTokenStore{collection: collection}, nil
 }
@@ -74,6 +73,18 @@ func (s *MongoResumeTokenStore) Save(ctx context.Context, collectionName string,
 	return err
 }
 
+// EnsureIndexes creates the necessary indexes for the resume token store.
+// Call this once during application startup.
+func (s *MongoResumeTokenStore) EnsureIndexes(ctx context.Context) error {
+	indexes := []mongo.IndexModel{
+		{
+			Keys: bson.D{{Key: "updated_at", Value: 1}},
+		},
+	}
+	_, err := s.collection.Indexes().CreateMany(ctx, indexes)
+	return err
+}
+
 // MongoAckStore implements AckStore using a MongoDB collection.
 // It tracks which change events have been acknowledged for at-least-once delivery.
 type MongoAckStore struct {
@@ -100,7 +111,7 @@ type ackDoc struct {
 //	)
 func NewMongoAckStore(collection *mongo.Collection, ttl time.Duration) (*MongoAckStore, error) {
 	if collection == nil {
-		return nil, fmt.Errorf("mongodb: collection must not be nil")
+		return nil, ErrCollectionNil
 	}
 	return &MongoAckStore{
 		collection: collection,
