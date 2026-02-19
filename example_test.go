@@ -199,7 +199,7 @@ func Example_withAckStore() {
 	}
 
 	// Create indexes for efficient queries and TTL-based cleanup
-	_ = ackStore.CreateIndexes(ctx)
+	_ = ackStore.EnsureIndexes(ctx)
 
 	// Create transport with ack store
 	transport, _ := mongodb.New(db,
@@ -517,7 +517,7 @@ func Example_completeSetup() {
 		fmt.Println("Error:", err)
 		return
 	}
-	_ = ackStore.CreateIndexes(ctx)
+	_ = ackStore.EnsureIndexes(ctx)
 
 	// 2. Claimer for WorkerPool emulation
 	claimer := distributed.NewMongoStateManager(internalDB,
