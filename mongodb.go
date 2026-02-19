@@ -209,7 +209,12 @@ func WithResumeTokenCollection(db *mongo.Database, collectionName string) Option
 	return func(o *transportOptions) {
 		store, err := NewMongoResumeTokenStore(db.Collection(collectionName))
 		if err != nil {
-			return // nil collection handled during Open() validation
+			logger := o.logger
+			if logger == nil {
+				logger = slog.Default()
+			}
+			logger.Warn("failed to create resume token store", "error", err)
+			return
 		}
 		o.resumeTokenStore = store
 	}
@@ -919,10 +924,12 @@ func (t *Transport) watchLoop(ctx context.Context) {
 				}
 			}
 
+			timer := time.NewTimer(backoffDuration)
 			select {
 			case <-ctx.Done():
+				timer.Stop()
 				return
-			case <-time.After(backoffDuration):
+			case <-timer.C:
 			}
 			continue
 		}
@@ -1313,7 +1320,11 @@ func (t *Transport) buildMessage(event ChangeEvent, payload []byte, metadata map
 			if err == nil && t.ackStore != nil {
 				ackCtx, cancel := context.WithTimeout(context.Background(), detachedTimeout)
 				defer cancel()
-				return t.ackStore.Ack(ackCtx, event.ID)
+				ackErr := t.ackStore.Ack(ackCtx, event.ID)
+				if ackErr != nil {
+					t.logger.Warn("failed to ack event", "event_id", event.ID, "error", ackErr)
+				}
+				return ackErr
 			}
 			return nil
 		},

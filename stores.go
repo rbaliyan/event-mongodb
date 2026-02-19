@@ -156,9 +156,9 @@ func (s *MongoAckStore) IsPending(ctx context.Context, eventID string) (bool, er
 	return doc.AckedAt.IsZero(), nil
 }
 
-// CreateIndexes creates the necessary indexes for the ack store.
+// EnsureIndexes creates the necessary indexes for the ack store.
 // Call this once during application startup.
-func (s *MongoAckStore) CreateIndexes(ctx context.Context) error {
+func (s *MongoAckStore) EnsureIndexes(ctx context.Context) error {
 	indexes := []mongo.IndexModel{
 		{
 			Keys: bson.D{{Key: "created_at", Value: 1}},

@@ -426,7 +426,7 @@ func runFullSetupExample() {
 	if err != nil {
 		log.Fatal("Failed to create ack store:", err)
 	}
-	if err := ackStore.CreateIndexes(ctx); err != nil {
+	if err := ackStore.EnsureIndexes(ctx); err != nil {
 		log.Fatal("Failed to create ack indexes:", err)
 	}
 
