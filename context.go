@@ -35,10 +35,10 @@ func ContextUpdateDescription(ctx context.Context) *UpdateDescription {
 	}
 	desc := &UpdateDescription{}
 	if hasUpdated && updated != "" {
-		json.Unmarshal([]byte(updated), &desc.UpdatedFields) //nolint:errcheck
+		_ = json.Unmarshal([]byte(updated), &desc.UpdatedFields)
 	}
 	if hasRemoved && removed != "" {
-		json.Unmarshal([]byte(removed), &desc.RemovedFields) //nolint:errcheck
+		_ = json.Unmarshal([]byte(removed), &desc.RemovedFields)
 	}
 	return desc
 }

@@ -207,7 +207,16 @@ func WithResumeTokenStore(store ResumeTokenStore) Option {
 //	)
 func WithResumeTokenCollection(db *mongo.Database, collectionName string) Option {
 	return func(o *transportOptions) {
-		o.resumeTokenStore = NewMongoResumeTokenStore(db.Collection(collectionName))
+		store, err := NewMongoResumeTokenStore(db.Collection(collectionName))
+		if err != nil {
+			logger := o.logger
+			if logger == nil {
+				logger = slog.Default()
+			}
+			logger.Warn("failed to create resume token store", "error", err)
+			return
+		}
+		o.resumeTokenStore = store
 	}
 }
 
@@ -473,11 +482,8 @@ func WithMaxUpdatedFieldsSize(bytes int) Option {
 //	t, err := mongodb.New(db,
 //	    mongodb.WithFullDocument(mongodb.FullDocumentUpdateLookup),
 //	)
-func New(db *mongo.Database, opts ...Option) (*Transport, error) {
-	if db == nil {
-		return nil, ErrDatabaseRequired
-	}
-
+// defaultOptions returns a transportOptions with default values applied.
+func defaultOptions(opts []Option) transportOptions {
 	o := transportOptions{
 		logger:     transport.Logger("transport>mongodb"),
 		onError:    func(error) {},
@@ -486,6 +492,15 @@ func New(db *mongo.Database, opts ...Option) (*Transport, error) {
 	for _, opt := range opts {
 		opt(&o)
 	}
+	return o
+}
+
+func New(db *mongo.Database, opts ...Option) (*Transport, error) {
+	if db == nil {
+		return nil, ErrDatabaseRequired
+	}
+
+	o := defaultOptions(opts)
 
 	watchCtx, watchCancel := context.WithCancel(context.Background())
 
@@ -540,14 +555,7 @@ func NewClusterWatch(client *mongo.Client, opts ...Option) (*Transport, error) {
 		return nil, ErrClientRequired
 	}
 
-	o := transportOptions{
-		logger:     transport.Logger("transport>mongodb"),
-		onError:    func(error) {},
-		bufferSize: 100,
-	}
-	for _, opt := range opts {
-		opt(&o)
-	}
+	o := defaultOptions(opts)
 
 	// Use "admin" database for storing resume tokens
 	adminDB := client.Database("admin")
@@ -615,7 +623,11 @@ func (t *Transport) init() error {
 
 	// Auto-create resume token store if not disabled and not provided
 	if !t.disableResume && t.resumeTokenStore == nil {
-		t.resumeTokenStore = NewMongoResumeTokenStore(t.db.Collection(defaultResumeTokenCollection))
+		store, err := NewMongoResumeTokenStore(t.db.Collection(defaultResumeTokenCollection))
+		if err != nil {
+			return fmt.Errorf("create resume token store: %w", err)
+		}
+		t.resumeTokenStore = store
 		t.logger.Debug("using default resume token collection",
 			"database", t.db.Name(),
 			"collection", defaultResumeTokenCollection)
@@ -912,10 +924,12 @@ func (t *Transport) watchLoop(ctx context.Context) {
 				}
 			}
 
+			timer := time.NewTimer(backoffDuration)
 			select {
 			case <-ctx.Done():
+				timer.Stop()
 				return
-			case <-time.After(backoffDuration):
+			case <-timer.C:
 			}
 			continue
 		}
@@ -1306,7 +1320,11 @@ func (t *Transport) buildMessage(event ChangeEvent, payload []byte, metadata map
 			if err == nil && t.ackStore != nil {
 				ackCtx, cancel := context.WithTimeout(context.Background(), detachedTimeout)
 				defer cancel()
-				return t.ackStore.Ack(ackCtx, event.ID)
+				ackErr := t.ackStore.Ack(ackCtx, event.ID)
+				if ackErr != nil {
+					t.logger.Warn("failed to ack event", "event_id", event.ID, "error", ackErr)
+				}
+				return ackErr
 			}
 			return nil
 		},

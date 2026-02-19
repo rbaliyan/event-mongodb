@@ -38,16 +38,21 @@ type CheckpointStore struct {
 	ttl        time.Duration
 }
 
+// checkpointOptions holds configuration for the checkpoint store.
+type checkpointOptions struct {
+	ttl time.Duration
+}
+
 // CheckpointStoreOption configures the checkpoint store.
-type CheckpointStoreOption func(*CheckpointStore)
+type CheckpointStoreOption func(*checkpointOptions)
 
 // WithCheckpointTTL sets the TTL for checkpoint documents.
 // Stale checkpoints will be automatically deleted after this duration.
 // Default is 0 (no automatic deletion).
 func WithCheckpointTTL(ttl time.Duration) CheckpointStoreOption {
-	return func(s *CheckpointStore) {
+	return func(o *checkpointOptions) {
 		if ttl > 0 {
-			s.ttl = ttl
+			o.ttl = ttl
 		}
 	}
 }
@@ -72,11 +77,13 @@ func NewCheckpointStore(collection *mongo.Collection, opts ...CheckpointStoreOpt
 		return nil, ErrCollectionRequired
 	}
 
+	o := checkpointOptions{}
+	for _, opt := range opts {
+		opt(&o)
+	}
 	s := &CheckpointStore{
 		collection: collection,
-	}
-	for _, opt := range opts {
-		opt(s)
+		ttl:        o.ttl,
 	}
 	return s, nil
 }

@@ -2,6 +2,7 @@ package mongodb
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -31,8 +32,11 @@ type resumeTokenDoc struct {
 //	    mongodb.WithCollection("orders"),
 //	    mongodb.WithResumeTokenStore(store),
 //	)
-func NewMongoResumeTokenStore(collection *mongo.Collection) *MongoResumeTokenStore {
-	return &MongoResumeTokenStore{collection: collection}
+func NewMongoResumeTokenStore(collection *mongo.Collection) (*MongoResumeTokenStore, error) {
+	if collection == nil {
+		return nil, ErrCollectionNil
+	}
+	return &MongoResumeTokenStore{collection: collection}, nil
 }
 
 // Load retrieves the resume token for a collection.
@@ -40,7 +44,7 @@ func (s *MongoResumeTokenStore) Load(ctx context.Context, collectionName string)
 	var doc resumeTokenDoc
 	err := s.collection.FindOne(ctx, bson.M{"_id": collectionName}).Decode(&doc)
 	if err != nil {
-		if err == mongo.ErrNoDocuments {
+		if errors.Is(err, mongo.ErrNoDocuments) {
 			return nil, nil // No token stored yet
 		}
 		return nil, err
@@ -69,6 +73,18 @@ func (s *MongoResumeTokenStore) Save(ctx context.Context, collectionName string,
 	return err
 }
 
+// EnsureIndexes creates the necessary indexes for the resume token store.
+// Call this once during application startup.
+func (s *MongoResumeTokenStore) EnsureIndexes(ctx context.Context) error {
+	indexes := []mongo.IndexModel{
+		{
+			Keys: bson.D{{Key: "updated_at", Value: 1}},
+		},
+	}
+	_, err := s.collection.Indexes().CreateMany(ctx, indexes)
+	return err
+}
+
 // MongoAckStore implements AckStore using a MongoDB collection.
 // It tracks which change events have been acknowledged for at-least-once delivery.
 type MongoAckStore struct {
@@ -93,11 +109,14 @@ type ackDoc struct {
 //	    mongodb.WithCollection("orders"),
 //	    mongodb.WithAckStore(store),
 //	)
-func NewMongoAckStore(collection *mongo.Collection, ttl time.Duration) *MongoAckStore {
+func NewMongoAckStore(collection *mongo.Collection, ttl time.Duration) (*MongoAckStore, error) {
+	if collection == nil {
+		return nil, ErrCollectionNil
+	}
 	return &MongoAckStore{
 		collection: collection,
 		ttl:        ttl,
-	}
+	}, nil
 }
 
 // Store marks an event as pending (not yet acknowledged).
@@ -128,7 +147,7 @@ func (s *MongoAckStore) IsPending(ctx context.Context, eventID string) (bool, er
 	var doc ackDoc
 	err := s.collection.FindOne(ctx, bson.M{"_id": eventID}).Decode(&doc)
 	if err != nil {
-		if err == mongo.ErrNoDocuments {
+		if errors.Is(err, mongo.ErrNoDocuments) {
 			return false, nil // Not found = not pending
 		}
 		return false, err
@@ -137,9 +156,9 @@ func (s *MongoAckStore) IsPending(ctx context.Context, eventID string) (bool, er
 	return doc.AckedAt.IsZero(), nil
 }
 
-// CreateIndexes creates the necessary indexes for the ack store.
+// EnsureIndexes creates the necessary indexes for the ack store.
 // Call this once during application startup.
-func (s *MongoAckStore) CreateIndexes(ctx context.Context) error {
+func (s *MongoAckStore) EnsureIndexes(ctx context.Context) error {
 	indexes := []mongo.IndexModel{
 		{
 			Keys: bson.D{{Key: "created_at", Value: 1}},
@@ -213,18 +232,15 @@ func buildAckFilter(filter AckFilter) bson.M {
 		f["acked_at"] = bson.M{"$gt": time.Time{}}
 	}
 
-	if !filter.StartTime.IsZero() {
-		if f["created_at"] == nil {
-			f["created_at"] = bson.M{}
+	if !filter.StartTime.IsZero() || !filter.EndTime.IsZero() {
+		createdFilter := bson.M{}
+		if !filter.StartTime.IsZero() {
+			createdFilter["$gte"] = filter.StartTime
 		}
-		f["created_at"].(bson.M)["$gte"] = filter.StartTime
-	}
-
-	if !filter.EndTime.IsZero() {
-		if f["created_at"] == nil {
-			f["created_at"] = bson.M{}
+		if !filter.EndTime.IsZero() {
+			createdFilter["$lt"] = filter.EndTime
 		}
-		f["created_at"].(bson.M)["$lt"] = filter.EndTime
+		f["created_at"] = createdFilter
 	}
 
 	return f

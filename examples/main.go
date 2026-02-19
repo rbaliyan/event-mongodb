@@ -419,11 +419,14 @@ func runFullSetupExample() {
 	// -------------------------------------------------------------------------
 	// The ack store tracks which events are pending acknowledgment.
 	// This enables redelivery of failed events on restart.
-	ackStore := mongodb.NewMongoAckStore(
+	ackStore, err := mongodb.NewMongoAckStore(
 		internalDB.Collection("_event_acks"),
 		24*time.Hour, // TTL for acknowledged events
 	)
-	if err := ackStore.CreateIndexes(ctx); err != nil {
+	if err != nil {
+		log.Fatal("Failed to create ack store:", err)
+	}
+	if err := ackStore.EnsureIndexes(ctx); err != nil {
 		log.Fatal("Failed to create ack indexes:", err)
 	}
 
