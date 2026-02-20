@@ -76,13 +76,18 @@ func (s *MongoResumeTokenStore) Save(ctx context.Context, collectionName string,
 // EnsureIndexes creates the necessary indexes for the resume token store.
 // Call this once during application startup.
 func (s *MongoResumeTokenStore) EnsureIndexes(ctx context.Context) error {
-	indexes := []mongo.IndexModel{
+	_, err := s.collection.Indexes().CreateMany(ctx, s.Indexes())
+	return err
+}
+
+// Indexes returns the index models for manual creation.
+// Use this if you prefer to manage indexes separately (e.g., via migrations).
+func (s *MongoResumeTokenStore) Indexes() []mongo.IndexModel {
+	return []mongo.IndexModel{
 		{
 			Keys: bson.D{{Key: "updated_at", Value: 1}},
 		},
 	}
-	_, err := s.collection.Indexes().CreateMany(ctx, indexes)
-	return err
 }
 
 // MongoAckStore implements AckStore using a MongoDB collection.
@@ -159,7 +164,14 @@ func (s *MongoAckStore) IsPending(ctx context.Context, eventID string) (bool, er
 // EnsureIndexes creates the necessary indexes for the ack store.
 // Call this once during application startup.
 func (s *MongoAckStore) EnsureIndexes(ctx context.Context) error {
-	indexes := []mongo.IndexModel{
+	_, err := s.collection.Indexes().CreateMany(ctx, s.Indexes())
+	return err
+}
+
+// Indexes returns the index models for manual creation.
+// Use this if you prefer to manage indexes separately (e.g., via migrations).
+func (s *MongoAckStore) Indexes() []mongo.IndexModel {
+	return []mongo.IndexModel{
 		{
 			Keys: bson.D{{Key: "created_at", Value: 1}},
 		},
@@ -169,9 +181,6 @@ func (s *MongoAckStore) EnsureIndexes(ctx context.Context) error {
 				SetPartialFilterExpression(bson.M{"acked_at": bson.M{"$gt": time.Time{}}}),
 		},
 	}
-
-	_, err := s.collection.Indexes().CreateMany(ctx, indexes)
-	return err
 }
 
 // List returns ack entries matching the filter.

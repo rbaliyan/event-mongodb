@@ -64,6 +64,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	eventlib "github.com/rbaliyan/event/v3"
 	"github.com/rbaliyan/event/v3/transport"
 	"github.com/rbaliyan/event/v3/transport/base"
 	"github.com/rbaliyan/event/v3/transport/channel"
@@ -123,6 +124,7 @@ type transportOptions struct {
 	includeUpdateDescription bool
 	emptyUpdates             bool
 	maxUpdatedFieldsSize     int
+	initErr                  error // Deferred error from option functions, checked during New()
 }
 
 // Transport implements transport.Transport using MongoDB change streams.
@@ -209,11 +211,7 @@ func WithResumeTokenCollection(db *mongo.Database, collectionName string) Option
 	return func(o *transportOptions) {
 		store, err := NewMongoResumeTokenStore(db.Collection(collectionName))
 		if err != nil {
-			logger := o.logger
-			if logger == nil {
-				logger = slog.Default()
-			}
-			logger.Warn("failed to create resume token store", "error", err)
+			o.initErr = fmt.Errorf("resume token store: %w", err)
 			return
 		}
 		o.resumeTokenStore = store
@@ -306,6 +304,10 @@ func WithStartFromPast(d time.Duration) Option {
 
 // WithAckStore sets the store for tracking acknowledgments.
 // This enables at-least-once delivery semantics.
+//
+// NOTE: If the ack callback fails (e.g., MongoDB write error), the event's ack record
+// remains "pending" in the store. The change stream continues processing and does not
+// retry the ack. Monitor for stale pending records in your AckStore.
 func WithAckStore(store AckStore) Option {
 	return func(o *transportOptions) {
 		o.ackStore = store
@@ -501,6 +503,9 @@ func New(db *mongo.Database, opts ...Option) (*Transport, error) {
 	}
 
 	o := defaultOptions(opts)
+	if o.initErr != nil {
+		return nil, o.initErr
+	}
 
 	watchCtx, watchCancel := context.WithCancel(context.Background())
 
@@ -556,6 +561,9 @@ func NewClusterWatch(client *mongo.Client, opts ...Option) (*Transport, error) {
 	}
 
 	o := defaultOptions(opts)
+	if o.initErr != nil {
+		return nil, o.initErr
+	}
 
 	// Use "admin" database for storing resume tokens
 	adminDB := client.Database("admin")
@@ -1178,7 +1186,7 @@ type changeStream interface {
 var _ changeStream = (*mongo.ChangeStream)(nil)
 
 // processChange processes a single change event from the change stream.
-func (t *Transport) processChange(_ context.Context, cs changeStream) error {
+func (t *Transport) processChange(ctx context.Context, cs changeStream) error {
 	// Decode change document into typed struct for type safety.
 	var doc changeStreamDoc
 	if err := cs.Decode(&doc); err != nil {
@@ -1188,7 +1196,7 @@ func (t *Transport) processChange(_ context.Context, cs changeStream) error {
 	// Extract change event data
 	changeEvent := t.extractChangeEvent(doc)
 
-	t.logger.Debug("change event received",
+	t.logger.DebugContext(ctx, "change event received",
 		"operation", changeEvent.OperationType,
 		"database", changeEvent.Database,
 		"collection", changeEvent.Collection,
@@ -1317,7 +1325,7 @@ func (t *Transport) buildMessage(event ChangeEvent, payload []byte, metadata map
 		metadata,
 		0,
 		func(err error) error {
-			if err == nil && t.ackStore != nil {
+			if (err == nil || errors.Is(err, eventlib.ErrAck)) && t.ackStore != nil {
 				ackCtx, cancel := context.WithTimeout(context.Background(), detachedTimeout)
 				defer cancel()
 				ackErr := t.ackStore.Ack(ackCtx, event.ID)

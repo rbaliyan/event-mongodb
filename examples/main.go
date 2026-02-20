@@ -197,10 +197,13 @@ func runWorkerPoolExample() {
 	// Create a claimer for worker coordination
 	// The claimer uses MongoDB for atomic claim acquisition,
 	// ensuring only one worker processes each message.
-	claimer := distributed.NewMongoStateManager(internalDB,
+	claimer, err := distributed.NewMongoStateManager(internalDB,
 		distributed.WithCollection("_order_worker_claims"), // Custom collection for this worker group
 		distributed.WithCompletedTTL(24*time.Hour),        // Remember completed messages for 24h
 	)
+	if err != nil {
+		log.Fatal("Failed to create claimer:", err)
+	}
 
 	// Create necessary indexes for TTL-based cleanup
 	if err := claimer.EnsureIndexes(ctx); err != nil {
@@ -263,10 +266,13 @@ func runWorkerPoolExample() {
 
 	// Optional: Set up orphan recovery
 	// This detects workers that crashed while processing and releases their claims
-	recoveryRunner := distributed.NewRecoveryRunner(claimer,
+	recoveryRunner, err := distributed.NewRecoveryRunner(claimer,
 		distributed.WithStaleTimeout(2*time.Minute),   // Message is orphaned if processing > 2min
 		distributed.WithCheckInterval(30*time.Second), // Check for orphans every 30s
 	)
+	if err != nil {
+		log.Fatal("Failed to create recovery runner:", err)
+	}
 	go recoveryRunner.Run(ctx)
 
 	fmt.Printf("Worker %s ready. Watching for order changes...\n", instanceID)
@@ -433,10 +439,13 @@ func runFullSetupExample() {
 	// -------------------------------------------------------------------------
 	// Step 2: Set up claimer for WorkerPool emulation
 	// -------------------------------------------------------------------------
-	claimer := distributed.NewMongoStateManager(internalDB,
+	claimer, err := distributed.NewMongoStateManager(internalDB,
 		distributed.WithCollection("_order_worker_claims"),
 		distributed.WithCompletedTTL(24*time.Hour),
 	)
+	if err != nil {
+		log.Fatal("Failed to create claimer:", err)
+	}
 	if err := claimer.EnsureIndexes(ctx); err != nil {
 		log.Fatal("Failed to create claim indexes:", err)
 	}
@@ -556,11 +565,14 @@ func runFullSetupExample() {
 	// -------------------------------------------------------------------------
 	// Step 7: Start orphan recovery
 	// -------------------------------------------------------------------------
-	recoveryRunner := distributed.NewRecoveryRunner(claimer,
+	recoveryRunner, err := distributed.NewRecoveryRunner(claimer,
 		distributed.WithStaleTimeout(2*time.Minute),
 		distributed.WithCheckInterval(30*time.Second),
 		distributed.WithBatchLimit(100),
 	)
+	if err != nil {
+		log.Fatal("Failed to create recovery runner:", err)
+	}
 	go recoveryRunner.Run(ctx)
 
 	// -------------------------------------------------------------------------
