@@ -371,7 +371,7 @@ func Example_withDistributed() {
 
 	// Create claimer for worker coordination
 	// Uses MongoDB's atomic findOneAndUpdate for race-condition-free coordination
-	claimer := distributed.NewMongoStateManager(internalDB,
+	claimer, _ := distributed.NewMongoStateManager(internalDB,
 		distributed.WithCollection("_order_worker_claims"), // Custom collection name
 		distributed.WithCompletedTTL(24*time.Hour),        // Remember completed messages for 24h
 	)
@@ -414,7 +414,7 @@ func Example_withDistributed() {
 
 	// Optional: Set up orphan recovery
 	// Detects workers that crashed and releases their claims
-	recoveryRunner := distributed.NewRecoveryRunner(claimer,
+	recoveryRunner, _ := distributed.NewRecoveryRunner(claimer,
 		distributed.WithStaleTimeout(2*time.Minute),
 		distributed.WithCheckInterval(30*time.Second),
 	)
@@ -520,7 +520,7 @@ func Example_completeSetup() {
 	_ = ackStore.EnsureIndexes(ctx)
 
 	// 2. Claimer for WorkerPool emulation
-	claimer := distributed.NewMongoStateManager(internalDB,
+	claimer, _ := distributed.NewMongoStateManager(internalDB,
 		distributed.WithCollection("_order_worker_claims"),
 		distributed.WithCompletedTTL(24*time.Hour),
 	)
@@ -573,7 +573,7 @@ func Example_completeSetup() {
 	))
 
 	// 7. Orphan recovery
-	recoveryRunner := distributed.NewRecoveryRunner(claimer,
+	recoveryRunner, _ := distributed.NewRecoveryRunner(claimer,
 		distributed.WithStaleTimeout(2*time.Minute),
 		distributed.WithCheckInterval(30*time.Second),
 	)
