@@ -3,6 +3,7 @@ package mongodb
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 
 	event "github.com/rbaliyan/event/v3"
 )
@@ -35,10 +36,14 @@ func ContextUpdateDescription(ctx context.Context) *UpdateDescription {
 	}
 	desc := &UpdateDescription{}
 	if hasUpdated && updated != "" {
-		_ = json.Unmarshal([]byte(updated), &desc.UpdatedFields)
+		if err := json.Unmarshal([]byte(updated), &desc.UpdatedFields); err != nil {
+			slog.DebugContext(ctx, "failed to unmarshal updated_fields metadata", "error", err)
+		}
 	}
 	if hasRemoved && removed != "" {
-		_ = json.Unmarshal([]byte(removed), &desc.RemovedFields)
+		if err := json.Unmarshal([]byte(removed), &desc.RemovedFields); err != nil {
+			slog.DebugContext(ctx, "failed to unmarshal removed_fields metadata", "error", err)
+		}
 	}
 	return desc
 }

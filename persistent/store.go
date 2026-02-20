@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	eventerrors "github.com/rbaliyan/event/v3/errors"
 	"github.com/rbaliyan/event/v3/transport/persistent"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
@@ -15,7 +16,7 @@ import (
 // Errors returned by the store.
 var (
 	// ErrCollectionRequired is returned when a nil collection is passed to NewStore.
-	ErrCollectionRequired = errors.New("mongodb collection is required")
+	ErrCollectionRequired = fmt.Errorf("mongodb: collection must not be nil: %w", eventerrors.ErrInvalidArgument)
 
 	// ErrMessageNotFound is returned when Ack or Nack is called for a non-existent message.
 	ErrMessageNotFound = errors.New("message not found")
@@ -280,47 +281,10 @@ func (s *Store) Nack(ctx context.Context, eventName string, sequenceID string) e
 //   - (event_name, _id) - for checkpoint-based queries
 //   - (acked_at) with TTL - for automatic cleanup (if TTL configured)
 func (s *Store) EnsureIndexes(ctx context.Context) error {
-	indexes := []mongo.IndexModel{
-		{
-			Keys: bson.D{
-				{Key: "event_name", Value: 1},
-				{Key: "status", Value: 1},
-				{Key: "timestamp", Value: 1},
-			},
-			Options: options.Index().SetName("event_status_timestamp"),
-		},
-		{
-			Keys: bson.D{
-				{Key: "event_name", Value: 1},
-				{Key: "_id", Value: 1},
-			},
-			Options: options.Index().SetName("event_id"),
-		},
-		{
-			Keys: bson.D{
-				{Key: "status", Value: 1},
-				{Key: "inflight_at", Value: 1},
-			},
-			Options: options.Index().SetName("inflight_visibility"),
-		},
-	}
-
-	// Add TTL index for automatic cleanup if configured
-	if s.ttl > 0 {
-		indexes = append(indexes, mongo.IndexModel{
-			Keys: bson.D{{Key: "acked_at", Value: 1}},
-			Options: options.Index().
-				SetName("acked_ttl").
-				SetExpireAfterSeconds(int32(s.ttl.Seconds())).
-				SetPartialFilterExpression(bson.M{"status": statusAcked}),
-		})
-	}
-
-	_, err := s.collection.Indexes().CreateMany(ctx, indexes)
+	_, err := s.collection.Indexes().CreateMany(ctx, s.Indexes())
 	if err != nil {
 		return fmt.Errorf("create indexes: %w", err)
 	}
-
 	return nil
 }
 

@@ -188,32 +188,10 @@ func (s *CheckpointStore) List(ctx context.Context, eventName string) (map[strin
 // EnsureIndexes creates the required indexes for efficient queries.
 // Call this once during application startup.
 func (s *CheckpointStore) EnsureIndexes(ctx context.Context) error {
-	indexes := []mongo.IndexModel{
-		{
-			Keys:    bson.D{{Key: "event_name", Value: 1}},
-			Options: options.Index().SetName("event_name"),
-		},
-		{
-			Keys:    bson.D{{Key: "consumer_id", Value: 1}},
-			Options: options.Index().SetName("consumer_id"),
-		},
-	}
-
-	// Add TTL index if configured
-	if s.ttl > 0 {
-		indexes = append(indexes, mongo.IndexModel{
-			Keys: bson.D{{Key: "updated_at", Value: 1}},
-			Options: options.Index().
-				SetName("checkpoint_ttl").
-				SetExpireAfterSeconds(int32(s.ttl.Seconds())),
-		})
-	}
-
-	_, err := s.collection.Indexes().CreateMany(ctx, indexes)
+	_, err := s.collection.Indexes().CreateMany(ctx, s.Indexes())
 	if err != nil {
 		return fmt.Errorf("create indexes: %w", err)
 	}
-
 	return nil
 }
 
