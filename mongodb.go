@@ -779,7 +779,7 @@ func (t *Transport) Close(ctx context.Context) error {
 
 // ResetResumeToken clears the stored resume token for this transport.
 // After calling this method, the next restart will start from:
-//   - The beginning of the oplog (if WithStartFromBeginning was set)
+//   - The beginning of the oplog (if WithStartFromPast was set)
 //   - The current position (default behavior)
 //
 // This is useful when:
@@ -1414,10 +1414,18 @@ func (t *Transport) extractChangeEvent(doc changeStreamDoc) ChangeEvent {
 	// Extract full document as JSON
 	if len(doc.FullDocument) > 0 {
 		var fullDoc bson.D
-		if err := bson.Unmarshal(doc.FullDocument, &fullDoc); err == nil {
-			if jsonData, err := bsonDToJSON(fullDoc); err == nil {
-				event.FullDocument = jsonData
-			}
+		if err := bson.Unmarshal(doc.FullDocument, &fullDoc); err != nil {
+			t.logger.Warn("failed to unmarshal full document",
+				"document_key", event.DocumentKey,
+				"operation", event.OperationType,
+				"error", err)
+		} else if jsonData, err := bsonDToJSON(fullDoc); err != nil {
+			t.logger.Warn("failed to convert full document to JSON",
+				"document_key", event.DocumentKey,
+				"operation", event.OperationType,
+				"error", err)
+		} else {
+			event.FullDocument = jsonData
 		}
 	}
 

@@ -147,8 +147,8 @@ func (s *MongoAckStore) Ack(ctx context.Context, eventID string) error {
 	return err
 }
 
-// IsPending checks if an event is still pending acknowledgment.
-func (s *MongoAckStore) IsPending(ctx context.Context, eventID string) (bool, error) {
+// isPending checks if an event is still pending acknowledgment.
+func (s *MongoAckStore) isPending(ctx context.Context, eventID string) (bool, error) {
 	var doc ackDoc
 	err := s.collection.FindOne(ctx, bson.M{"_id": eventID}).Decode(&doc)
 	if err != nil {
