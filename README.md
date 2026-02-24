@@ -168,7 +168,7 @@ t, _ := mongodb.New(db,
 // Start from beginning of oplog on first start (process all available history)
 t, _ := mongodb.New(db,
     mongodb.WithCollection("orders"),
-    mongodb.WithStartFromBeginning(),
+    mongodb.WithStartFromPast(0), // 0 means process all available history
 )
 ```
 
@@ -188,7 +188,7 @@ fmt.Printf("Token key: %s\n", key)
 ```
 
 After resetting, the next restart will:
-- Start from the beginning of oplog (if `WithStartFromBeginning` was set)
+- Start from the beginning of oplog (if `WithStartFromPast` was set)
 - Start from the current position (default behavior)
 
 ### Full Document Options
@@ -478,11 +478,7 @@ func diagnoseEvent(ctx context.Context, eventID string) {
             e.SubscriptionID, e.Status, e.Duration, e.TraceID)
     }
 
-    // 2. AckStore: is it still pending delivery?
-    pending, _ := ackStore.IsPending(ctx, eventID)
-    fmt.Printf("  pending_ack=%v\n", pending)
-
-    // 3. DLQ: did it get rejected after exhausting retries?
+    // 2. DLQ: did it get rejected after exhausting retries?
     dlqMsg, err := dlqStore.GetByOriginalID(ctx, eventID)
     if err == nil {
         fmt.Printf("  DLQ: error=%s retries=%d created=%v\n",

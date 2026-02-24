@@ -147,20 +147,6 @@ func (s *MongoAckStore) Ack(ctx context.Context, eventID string) error {
 	return err
 }
 
-// IsPending checks if an event is still pending acknowledgment.
-func (s *MongoAckStore) IsPending(ctx context.Context, eventID string) (bool, error) {
-	var doc ackDoc
-	err := s.collection.FindOne(ctx, bson.M{"_id": eventID}).Decode(&doc)
-	if err != nil {
-		if errors.Is(err, mongo.ErrNoDocuments) {
-			return false, nil // Not found = not pending
-		}
-		return false, err
-	}
-	// Pending if acked_at is zero
-	return doc.AckedAt.IsZero(), nil
-}
-
 // EnsureIndexes creates the necessary indexes for the ack store.
 // Call this once during application startup.
 func (s *MongoAckStore) EnsureIndexes(ctx context.Context) error {
