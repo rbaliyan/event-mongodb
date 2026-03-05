@@ -1,0 +1,5 @@
+#!/bin/bash -eu
+compile_native_go_fuzzer github.com/rbaliyan/event-mongodb FuzzFormatDocumentKey fuzz_format_document_key
+compile_native_go_fuzzer github.com/rbaliyan/event-mongodb FuzzBsonDToJSON fuzz_bson_d_to_json
+compile_native_go_fuzzer github.com/rbaliyan/event-mongodb FuzzConvertBSONTypes fuzz_convert_bson_types
+compile_native_go_fuzzer github.com/rbaliyan/event-mongodb FuzzChangeEventJSON fuzz_change_event_json
