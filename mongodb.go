@@ -615,7 +615,7 @@ func (t *Transport) init() error {
 	// Use a 5-minute fallback timeout to give MongoDB CS handlers generous
 	// backpressure tolerance instead of the default 30s.
 	t.channelTransport = channel.New(
-		channel.WithBufferSize(uint(t.bufferSize)),
+		channel.WithBufferSize(uint(t.bufferSize)), // #nosec G115 -- bufferSize is a small positive value
 		channel.WithLogger(t.logger),
 		channel.WithFallbackTimeout(5*time.Minute),
 	)
@@ -1006,7 +1006,7 @@ func (t *Transport) watchOnce(ctx context.Context, onConnected func()) error {
 	if !hasExistingToken && t.startFromPast > 0 && atomic.CompareAndSwapInt32(&t.startFromPastTried, 0, 1) {
 		startTime := time.Now().Add(-t.startFromPast)
 		// Convert to MongoDB Timestamp (seconds since Unix epoch in T field)
-		csOpts.SetStartAtOperationTime(&bson.Timestamp{T: uint32(startTime.Unix()), I: 0})
+		csOpts.SetStartAtOperationTime(&bson.Timestamp{T: uint32(startTime.Unix()), I: 0}) // #nosec G115 -- Unix timestamp fits in uint32 until year 2106
 		t.logger.Info("starting from past (no resume token)",
 			"key", resumeKey,
 			"start_time", startTime,
