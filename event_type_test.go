@@ -65,6 +65,9 @@ func TestEventType_MessageFilter(t *testing.T) {
 		{EventDeleted, "update", false},
 		// Missing operation
 		{EventCreated, "", false},
+		// Unknown type rejects all
+		{EventType(99), "insert", false},
+		{EventType(99), "delete", false},
 	}
 	for _, tt := range tests {
 		filter := tt.et.MessageFilter()

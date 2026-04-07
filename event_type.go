@@ -47,6 +47,9 @@ func (t EventType) Operations() []OperationType {
 // It returns true only for messages whose "operation" metadata matches this event type's
 // operations, allowing non-matching messages to be skipped before payload decoding.
 //
+// For unknown event types (where Operations returns nil), the returned filter rejects
+// all messages.
+//
 // Example:
 //
 //	evt := event.New[Model]("order.created",
@@ -55,11 +58,12 @@ func (t EventType) Operations() []OperationType {
 //	)
 func (t EventType) MessageFilter() func(map[string]string) bool {
 	ops := t.Operations()
-	allowed := make(map[string]bool, len(ops))
+	allowed := make(map[string]struct{}, len(ops))
 	for _, op := range ops {
-		allowed[string(op)] = true
+		allowed[string(op)] = struct{}{}
 	}
 	return func(meta map[string]string) bool {
-		return allowed[meta[MetadataOperation]]
+		_, ok := allowed[meta[MetadataOperation]]
+		return ok
 	}
 }

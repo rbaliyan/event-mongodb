@@ -10,14 +10,14 @@ import (
 // This is useful for cluster-level change streams that need to be scoped to
 // specific namespaces.
 //
-// Returns an empty pipeline if collections is empty.
+// Returns an empty pipeline if database is empty or collections is empty.
 //
 // Example:
 //
 //	pipeline := mongodb.CollectionFilterPipeline("mydb", []string{"orders", "users"})
 //	transport, _ := mongodb.NewClusterWatch(client, mongodb.WithPipeline(pipeline))
 func CollectionFilterPipeline(database string, collections []string) mongo.Pipeline {
-	if len(collections) == 0 {
+	if database == "" || len(collections) == 0 {
 		return mongo.Pipeline{}
 	}
 	return mongo.Pipeline{
