@@ -4,7 +4,7 @@ go 1.25.8
 
 require (
 	github.com/AdamKorcz/go-118-fuzz-build v0.0.0-20250520111509-a70c2aa677fa
-	github.com/rbaliyan/event/v3 v3.15.8
+	github.com/rbaliyan/event/v3 v3.15.10
 	go.mongodb.org/mongo-driver/v2 v2.5.0
 	go.opentelemetry.io/otel v1.43.0
 	go.opentelemetry.io/otel/metric v1.43.0
