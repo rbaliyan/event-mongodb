@@ -2,6 +2,7 @@ package mongodb
 
 import (
 	"encoding/json"
+	"slices"
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -75,11 +76,107 @@ type ChangeEvent struct {
 	Namespace     string             `json:"namespace"` // "database.collection" format
 }
 
-// UpdateDescription contains details about an update operation
+// UpdateDescription contains details about an update operation.
+//
+// Use [Field] for typed extraction from UpdatedFields, [HasField] for
+// presence checks, and [HasFieldRemoved] for deletion checks. These
+// accessors handle nil receivers and the JSON/BSON type divergence
+// transparently.
 type UpdateDescription struct {
 	UpdatedFields   map[string]any `json:"updated_fields,omitempty"`
 	RemovedFields   []string       `json:"removed_fields,omitempty"`
 	TruncatedArrays []string       `json:"truncated_arrays,omitempty"`
+}
+
+// HasField reports whether key is present in UpdatedFields.
+func (d *UpdateDescription) HasField(key string) bool {
+	if d == nil {
+		return false
+	}
+	_, ok := d.UpdatedFields[key]
+	return ok
+}
+
+// HasFieldRemoved reports whether key was removed (unset) by the update.
+func (d *UpdateDescription) HasFieldRemoved(key string) bool {
+	if d == nil {
+		return false
+	}
+	return slices.Contains(d.RemovedFields, key)
+}
+
+// Field extracts a typed value from UpdatedFields. Returns the zero
+// value and false if the key is absent, the receiver is nil, or the
+// stored value cannot be converted to T.
+//
+// Field performs cross-conversion between numeric types (int, int32,
+// int64, float32, float64) so the same call works whether
+// UpdatedFields was populated via BSON decoding (ChangeEvent.UpdateDesc
+// — values are int32, int64, etc.) or JSON decoding
+// ([ContextUpdateDescription] — all numbers are float64).
+//
+//	status, ok := mongodb.Field[string](desc, "status")
+//	count, ok := mongodb.Field[int64](desc, "retry_count")
+func Field[T any](desc *UpdateDescription, key string) (T, bool) {
+	var zero T
+	if desc == nil {
+		return zero, false
+	}
+	v, ok := desc.UpdatedFields[key]
+	if !ok || v == nil {
+		return zero, false
+	}
+	if typed, ok := v.(T); ok {
+		return typed, true
+	}
+	// Numeric cross-conversion: BSON gives int32/int64, JSON gives float64.
+	if out, ok := coerceNumeric[T](v); ok {
+		return out, true
+	}
+	return zero, false
+}
+
+// coerceNumeric attempts to convert v to the target numeric type T.
+// Returns false if v is not a numeric type or T is not numeric.
+func coerceNumeric[T any](v any) (T, bool) {
+	var zero T
+
+	// Extract source as float64 (universal intermediate).
+	var f float64
+	switch src := v.(type) {
+	case float64:
+		f = src
+	case float32:
+		f = float64(src)
+	case int:
+		f = float64(src)
+	case int32:
+		f = float64(src)
+	case int64:
+		f = float64(src)
+	default:
+		return zero, false
+	}
+
+	// Convert to target type.
+	var result any
+	switch any(*new(T)).(type) {
+	case float64:
+		result = f
+	case float32:
+		result = float32(f)
+	case int:
+		result = int(f)
+	case int32:
+		result = int32(f)
+	case int64:
+		result = int64(f)
+	default:
+		return zero, false
+	}
+
+	out, ok := result.(T)
+	return out, ok
 }
 
 // changeStreamDoc represents the MongoDB change stream document structure.
