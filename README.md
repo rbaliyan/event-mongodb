@@ -55,6 +55,9 @@ orderEvent.Subscribe(ctx, func(ctx context.Context, e event.Event[Order], order 
     fmt.Printf("Order changed: %s\n", order.ID)
     return nil
 })
+
+// Start watching AFTER all subscribers are registered
+transport.Start(ctx)
 ```
 
 ### Watch Levels
@@ -165,10 +168,10 @@ t, _ := mongodb.New(db,
     mongodb.WithoutResume(),
 )
 
-// Start from beginning of oplog on first start (process all available history)
+// Start from a point in the past on first start (process historical events)
 t, _ := mongodb.New(db,
     mongodb.WithCollection("orders"),
-    mongodb.WithStartFromPast(0), // 0 means process all available history
+    mongodb.WithStartFromPast(72*time.Hour), // process up to 72h of available oplog history
 )
 ```
 
@@ -231,11 +234,11 @@ orderEvent.Subscribe(ctx, func(ctx context.Context, e event.Event[Order], order 
 Track which events have been processed:
 
 ```go
-ackStore := mongodb.NewMongoAckStore(
+ackStore, _ := mongodb.NewMongoAckStore(
     internalDB.Collection("_event_acks"),
     24*time.Hour, // TTL for acknowledged events
 )
-ackStore.CreateIndexes(ctx)
+ackStore.EnsureIndexes(ctx)
 
 transport, _ := mongodb.New(db,
     mongodb.WithCollection("orders"),
@@ -394,11 +397,11 @@ import (
 monitorStore := monitor.NewMongoStore(internalDB)
 
 // AckStore: delivery guarantee tracking
-ackStore := mongodb.NewMongoAckStore(
+ackStore, _ := mongodb.NewMongoAckStore(
     internalDB.Collection("_event_acks"),
     24*time.Hour,
 )
-ackStore.CreateIndexes(ctx)
+ackStore.EnsureIndexes(ctx)
 
 // DLQ: permanently failed events
 dlqStore := dlq.NewMongoStore(internalDB)
@@ -428,6 +431,7 @@ transport, _ := mongodb.New(db,
     mongodb.WithCollection("orders"),
     mongodb.WithFullDocument(mongodb.FullDocumentUpdateLookup),
     mongodb.WithAckStore(ackStore),
+    mongodb.WithMetrics(metrics), // transport-level: stream count, reconnections, receive lag
 )
 
 bus, _ := event.NewBus("orders", event.WithTransport(transport))
@@ -544,11 +548,12 @@ import (
     "github.com/rbaliyan/event/v3/distributed"
 )
 
-// Create claimer for worker coordination
+// Create state manager for worker coordination
 // Uses MongoDB's atomic findOneAndUpdate for race-condition-free coordination
-claimer := distributed.NewMongoClaimer(internalDB).
-    WithCollection("_order_worker_claims"). // Custom collection name
-    WithCompletionTTL(24 * time.Hour)       // Remember completed messages for 24h
+claimer, _ := distributed.NewMongoStateManager(internalDB,
+    distributed.WithCollection("_order_worker_claims"), // Custom collection name
+    distributed.WithCompletedTTL(24*time.Hour),         // Remember completed messages for 24h
+)
 
 // Create TTL index for automatic cleanup
 claimer.EnsureIndexes(ctx)
@@ -569,7 +574,7 @@ orderChanges.Subscribe(ctx, func(ctx context.Context, ev event.Event[mongodb.Cha
 
     return nil
 }, event.WithMiddleware(
-    distributed.DistributedWorkerMiddleware[mongodb.ChangeEvent](claimer, claimTTL),
+    distributed.WorkerPoolMiddleware[mongodb.ChangeEvent](claimer, claimTTL),
 ))
 ```
 
@@ -578,7 +583,7 @@ orderChanges.Subscribe(ctx, func(ctx context.Context, ev event.Event[mongodb.Cha
 Detect crashed workers and release their claims:
 
 ```go
-recoveryRunner := distributed.NewOrphanRecoveryRunner(claimer,
+recoveryRunner, _ := distributed.NewRecoveryRunner(claimer,
     distributed.WithStaleTimeout(2*time.Minute),   // Message is orphaned if processing > 2min
     distributed.WithCheckInterval(30*time.Second), // Check every 30s
 )
@@ -647,16 +652,17 @@ import (
 )
 
 // 1. Acknowledgment store for at-least-once delivery
-ackStore := mongodb.NewMongoAckStore(
+ackStore, _ := mongodb.NewMongoAckStore(
     internalDB.Collection("_event_acks"),
     24*time.Hour,
 )
-ackStore.CreateIndexes(ctx)
+ackStore.EnsureIndexes(ctx)
 
-// 2. Claimer for WorkerPool emulation
-claimer := distributed.NewMongoClaimer(internalDB).
-    WithCollection("_order_worker_claims").
-    WithCompletionTTL(24 * time.Hour)
+// 2. State manager for WorkerPool emulation
+claimer, _ := distributed.NewMongoStateManager(internalDB,
+    distributed.WithCollection("_order_worker_claims"),
+    distributed.WithCompletedTTL(24*time.Hour),
+)
 claimer.EnsureIndexes(ctx)
 
 // 3. Idempotency store for deduplication
@@ -698,11 +704,11 @@ orderChanges.Subscribe(ctx, func(ctx context.Context, ev event.Event[mongodb.Cha
     idempotencyStore.MarkProcessed(ctx, messageID)
     return nil
 }, event.WithMiddleware(
-    distributed.DistributedWorkerMiddleware[mongodb.ChangeEvent](claimer, claimTTL),
+    distributed.WorkerPoolMiddleware[mongodb.ChangeEvent](claimer, claimTTL),
 ))
 
 // 7. Orphan recovery
-recoveryRunner := distributed.NewOrphanRecoveryRunner(claimer,
+recoveryRunner, _ := distributed.NewRecoveryRunner(claimer,
     distributed.WithStaleTimeout(2*time.Minute),
     distributed.WithCheckInterval(30*time.Second),
 )

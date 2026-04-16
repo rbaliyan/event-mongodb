@@ -16,6 +16,7 @@
 //   - Resume tokens for reliable change stream resumption
 //   - Optional acknowledgment tracking via MongoDB collection
 //   - Automatic reconnection with exponential backoff
+//   - OpenTelemetry metrics via [MetricsMiddleware] (handler-level) and [WithMetrics] (transport-level)
 //
 // Limitations:
 //   - Publish() is not supported - changes are triggered by database writes
