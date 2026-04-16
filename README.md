@@ -26,7 +26,7 @@ go get github.com/rbaliyan/event-mongodb
 - Flexible payload options (full ChangeEvent or document only)
 - Update description metadata (updated/removed fields) via context
 - Empty update filtering and updated fields size limits
-- OpenTelemetry metrics with subscriber middleware (oplog lag, handler duration, throughput, pending gauge)
+- OpenTelemetry metrics: handler middleware (oplog lag, handler duration, throughput, pending gauge) and transport-level metrics (active stream count, reconnections, receive lag)
 
 ## Usage
 
@@ -309,6 +309,11 @@ metrics, err := mongodb.NewMetrics(
 )
 defer metrics.Close()
 
+// Attach to transport for stream-level metrics (active count, reconnections, receive lag)
+t, _ := mongodb.NewClusterWatch(client,
+    mongodb.WithMetrics(metrics),
+)
+
 // Wire pending gauge to your ack store
 metrics.SetPendingCallback(func() int64 {
     count, _ := db.Collection("_event_acks").CountDocuments(ctx,
@@ -316,7 +321,7 @@ metrics.SetPendingCallback(func() int64 {
     return count
 })
 
-// Use as subscriber middleware
+// Use as subscriber middleware for handler-level metrics
 orderEvent.Subscribe(ctx, handler,
     event.WithMiddleware(mongodb.MetricsMiddleware[mongodb.ChangeEvent](metrics)),
 )
@@ -324,13 +329,20 @@ orderEvent.Subscribe(ctx, handler,
 
 Available metrics:
 
-| Metric | Type | Description |
-|--------|------|-------------|
-| `mongodb_changes_processed_total` | Counter | Events processed successfully (by event, operation, namespace) |
-| `mongodb_changes_failed_total` | Counter | Handler errors (by event, operation, namespace) |
-| `mongodb_oplog_lag_seconds` | Histogram | Delay from MongoDB clusterTime to handler execution |
-| `mongodb_handler_duration_seconds` | Histogram | Handler processing time |
-| `mongodb_changes_pending` | Gauge | Pending unacked events (callback-based) |
+| Metric | Type | Attrs | Description |
+|--------|------|-------|-------------|
+| `mongodb_changes_processed_total` | Counter | event, operation, namespace | Events processed successfully |
+| `mongodb_changes_failed_total` | Counter | event, operation, namespace | Handler errors |
+| `mongodb_oplog_lag_seconds` | Histogram | event, namespace | Delay from clusterTime to **handler execution** |
+| `mongodb_handler_duration_seconds` | Histogram | event, operation, namespace | Handler processing time |
+| `mongodb_changes_pending` | Gauge | — | Pending unacked events (callback-based) |
+| `mongodb_stream_active` | UpDownCounter | namespace | Currently open change streams |
+| `mongodb_stream_reconnections_total` | Counter | namespace, reason | Reconnections (`reason`: `error` \| `history_lost`) |
+| `mongodb_stream_receive_lag_seconds` | Histogram | namespace | Delay from clusterTime to **transport receive** (before handler) |
+
+`mongodb_stream_receive_lag_seconds` vs `mongodb_oplog_lag_seconds`: the receive lag isolates
+network and oplog propagation latency; subtracting it from oplog lag gives handler queuing +
+processing time.
 
 ### Event Lifecycle Observability
 
@@ -344,9 +356,9 @@ For production change stream processing, combine four complementary layers to ac
 | **DLQ** | Permanently failed event capture | Did event X get rejected? What errors are recurring? |
 
 ```
-Change Stream
+Change Stream (WithMetrics) ──► stream_active, reconnections_total
     │
-    ▼
+    ▼ (receive_lag recorded here)
 AckStore.Store(pending)
     │
     ▼
@@ -354,7 +366,7 @@ Monitor middleware ──► pending → completed
     │                         → failed
     │                         → retrying
     ▼
-Metrics middleware ──► counters, histograms, oplog lag
+Metrics middleware ──► processed/failed counters, handler_duration, oplog_lag
     │
     ▼
 Handler
