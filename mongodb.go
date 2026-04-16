@@ -126,7 +126,8 @@ type transportOptions struct {
 	emptyUpdates             bool
 	maxUpdatedFieldsSize     int
 	metrics                  *Metrics // Optional transport-level metrics (stream count, reconnections, receive lag)
-	initErr                  error    // Deferred error from option functions, checked during New()
+	historyLostCallback      func(ctx context.Context, key string, err error) // Called when oplog history is lost
+	initErr                  error                                             // Deferred error from option functions, checked during New()
 }
 
 // Transport implements transport.Transport using MongoDB change streams.
@@ -301,6 +302,34 @@ func WithResumeTokenID(id string) Option {
 func WithStartFromPast(d time.Duration) Option {
 	return func(o *transportOptions) {
 		o.startFromPast = d
+	}
+}
+
+// WithHistoryLostCallback sets a callback that is invoked when the change stream
+// encounters a ChangeStreamHistoryLost error — meaning the resume token points to
+// a position that no longer exists in the oplog (typically because the service was
+// offline longer than the oplog retention window, usually 24-72 hours).
+//
+// When this occurs the transport automatically clears the stale token and restarts
+// from the current oplog position, which means ALL changes that occurred during the
+// gap are permanently skipped. The callback receives the resume token key and the
+// underlying error so callers can alert, record metrics, or trigger a full resync.
+//
+// The callback is invoked on the watcher goroutine before the token is cleared.
+// It MUST NOT block; do heavy work asynchronously.
+//
+// Example:
+//
+//	mongodb.WithHistoryLostCallback(func(ctx context.Context, key string, err error) {
+//	    slog.Error("CRITICAL: change stream gap — events permanently skipped",
+//	        "key", key, "error", err)
+//	    alerting.Fire("change_stream_history_lost", key)
+//	})
+func WithHistoryLostCallback(fn func(ctx context.Context, key string, err error)) Option {
+	return func(o *transportOptions) {
+		if fn != nil {
+			o.historyLostCallback = fn
+		}
 	}
 }
 
@@ -951,6 +980,10 @@ func (t *Transport) watchLoop(ctx context.Context) {
 			// This means the resume token or start time points to a position no longer in the oplog
 			if historyLost {
 				t.logger.Warn("oplog does not contain requested position, clearing and starting fresh")
+				// Invoke callback before clearing so the caller sees the error with the key intact.
+				if t.historyLostCallback != nil {
+					t.historyLostCallback(ctx, t.resumeTokenKey(), err)
+				}
 				if t.resumeTokenStore != nil {
 					resumeKey := t.resumeTokenKey()
 					clearCtx, clearCancel := context.WithTimeout(context.Background(), detachedTimeout)
