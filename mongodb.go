@@ -124,7 +124,8 @@ type transportOptions struct {
 	includeUpdateDescription bool
 	emptyUpdates             bool
 	maxUpdatedFieldsSize     int
-	initErr                  error // Deferred error from option functions, checked during New()
+	metrics                  *Metrics // Optional transport-level metrics (stream count, reconnections, receive lag)
+	initErr                  error    // Deferred error from option functions, checked during New()
 }
 
 // Transport implements transport.Transport using MongoDB change streams.
@@ -361,6 +362,25 @@ func WithBatchSize(size int32) Option {
 func WithMaxAwaitTime(d time.Duration) Option {
 	return func(o *transportOptions) {
 		o.maxAwaitTime = &d
+	}
+}
+
+// WithMetrics attaches a Metrics instance to the transport for recording
+// transport-level metrics: active stream count, reconnections, and receive lag.
+//
+// The same Metrics instance can be shared with MetricsMiddleware so all
+// change stream observability flows through one set of instruments.
+//
+// Example:
+//
+//	metrics, _ := mongodb.NewMetrics()
+//	t, _ := mongodb.NewClusterWatch(client,
+//	    mongodb.WithMetrics(metrics),
+//	)
+//	event.Subscribe(ctx, handler, event.WithMiddleware(mongodb.MetricsMiddleware[T](metrics)))
+func WithMetrics(m *Metrics) Option {
+	return func(o *transportOptions) {
+		o.metrics = m
 	}
 }
 
@@ -914,13 +934,21 @@ func (t *Transport) watchLoop(ctx context.Context) {
 			// Notify error handler
 			t.onError(err)
 
+			historyLost := isChangeStreamHistoryLost(err)
 			backoffDuration := backoff.Next()
 			t.logger.Error("change stream error, reconnecting",
 				"error", err, "backoff", backoffDuration)
 
+			// Record reconnection metric with reason
+			reconnectReason := "error"
+			if historyLost {
+				reconnectReason = "history_lost"
+			}
+			t.metrics.RecordReconnection(ctx, t.watchNamespace(), reconnectReason)
+
 			// Check if this is a ChangeStreamHistoryLost error
 			// This means the resume token or start time points to a position no longer in the oplog
-			if isChangeStreamHistoryLost(err) {
+			if historyLost {
 				t.logger.Warn("oplog does not contain requested position, clearing and starting fresh")
 				if t.resumeTokenStore != nil {
 					resumeKey := t.resumeTokenKey()
@@ -1042,6 +1070,12 @@ func (t *Transport) watchOnce(ctx context.Context, onConnected func()) error {
 		_ = cs.Close(closeCtx)
 	}()
 
+	// Track active stream count. RecordStreamClosed uses Background so it
+	// succeeds during shutdown when ctx may already be cancelled.
+	streamNS := t.watchNamespace()
+	t.metrics.RecordStreamOpened(ctx, streamNS)
+	defer t.metrics.RecordStreamClosed(context.Background(), streamNS)
+
 	// Handle first-time start (no existing token).
 	// Default: save current position to skip historical oplog events.
 	// With startFromPast: process historical events, don't save initial position.
@@ -1157,6 +1191,21 @@ func (t *Transport) resumeTokenKey() string {
 	return namespace + ":" + t.resumeTokenID
 }
 
+// watchNamespace returns a human-readable identifier for the change stream target.
+// Used as the "namespace" attribute on transport-level metrics.
+func (t *Transport) watchNamespace() string {
+	switch t.level {
+	case watchLevelCollection:
+		return t.db.Name() + "." + t.collectionName
+	case watchLevelDatabase:
+		return t.db.Name() + ".*"
+	case watchLevelCluster:
+		return "*.*"
+	default:
+		return "unknown"
+	}
+}
+
 // watchLevelString returns a human-readable string for the watch level.
 func (t *Transport) watchLevelString() string {
 	switch t.level {
@@ -1195,6 +1244,14 @@ func (t *Transport) processChange(ctx context.Context, cs changeStream) error {
 
 	// Extract change event data
 	changeEvent := t.extractChangeEvent(doc)
+
+	// Record receive lag: delay from MongoDB oplog timestamp to when the transport
+	// received this event. This measures network + oplog propagation delay before
+	// any handler processing or queuing. ClusterTime.T is 0 for synthetic events.
+	if doc.ClusterTime.T > 0 {
+		lag := time.Since(time.Unix(int64(doc.ClusterTime.T), 0)).Seconds() // #nosec G115 -- Unix timestamp fits in int64
+		t.metrics.RecordReceiveLag(ctx, lag, changeEvent.Namespace)
+	}
 
 	t.logger.DebugContext(ctx, "change event received",
 		"operation", changeEvent.OperationType,
