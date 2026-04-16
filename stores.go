@@ -3,6 +3,7 @@ package mongodb
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -36,7 +37,13 @@ func NewMongoResumeTokenStore(collection *mongo.Collection) (*MongoResumeTokenSt
 	if collection == nil {
 		return nil, ErrCollectionNil
 	}
-	return &MongoResumeTokenStore{collection: collection}, nil
+	s := &MongoResumeTokenStore{collection: collection}
+	go func() { // #nosec G118 — background goroutine intentionally outlives constructor context
+		if err := s.EnsureIndexes(context.Background()); err != nil {
+			slog.Default().Error("failed to ensure resume token indexes", "error", err)
+		}
+	}()
+	return s, nil
 }
 
 // Load retrieves the resume token for a collection.
@@ -118,10 +125,16 @@ func NewMongoAckStore(collection *mongo.Collection, ttl time.Duration) (*MongoAc
 	if collection == nil {
 		return nil, ErrCollectionNil
 	}
-	return &MongoAckStore{
+	s := &MongoAckStore{
 		collection: collection,
 		ttl:        ttl,
-	}, nil
+	}
+	go func() { // #nosec G118 — background goroutine intentionally outlives constructor context
+		if err := s.EnsureIndexes(context.Background()); err != nil {
+			slog.Default().Error("failed to ensure ack store indexes", "error", err)
+		}
+	}()
+	return s, nil
 }
 
 // Store marks an event as pending (not yet acknowledged).
