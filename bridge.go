@@ -6,21 +6,22 @@ import (
 )
 
 // DedupKeyFromChangeStream returns a [bridge.DedupKeyFn] that derives
-// a stable deduplication key from MongoDB change stream metadata.
+// a stable deduplication key from the MongoDB change stream event ID.
 //
-// The key is the tuple (cluster_time, namespace, document_key) which
-// uniquely identifies a single change event across replay: two
-// messages with the same cluster time, namespace, and document key
-// represent the same logical change regardless of which bridge replica
-// received them. This is the correct key for a [bridge.Dedup]
-// middleware that deduplicates change-stream messages into a sink
-// transport with consumer groups (Redis Streams, Kafka, NATS JetStream).
+// The key is the message ID, which is set to the resume token _data field
+// (doc._id._data) by the MongoDB transport. This field is the hex-encoded
+// oplog position and is deterministic: all bridge replicas watching the same
+// change stream will produce the same _data value for the same change event,
+// making it the correct deduplication key across replicas.
 //
-// Returns an empty string when any required metadata field is missing
-// — for example when the message did not originate from this
-// transport. An empty key causes [bridge.Dedup] to bypass dedup for
-// that message, which is the correct fallback (the bridge forwards it
-// unchanged rather than silently dropping it).
+// Using the resume token is more precise than a (cluster_time, namespace,
+// document_key) tuple because the MongoDB cluster time has only second-level
+// precision in the transport metadata; two updates to the same document within
+// the same second would otherwise share an identical tuple and cause one event
+// to be silently dropped.
+//
+// Returns an empty string when the message is nil or has no ID, which causes
+// [bridge.Dedup] to bypass dedup for that message (forward unchanged).
 //
 // Example:
 //
@@ -37,16 +38,9 @@ func DedupKeyFromChangeStream() bridge.DedupKeyFn {
 		if msg == nil {
 			return ""
 		}
-		md := msg.Metadata()
-		if md == nil {
-			return ""
-		}
-		ct := md[MetadataClusterTime]
-		ns := md[MetadataNamespace]
-		dk := md[MetadataDocumentKey]
-		if ct == "" || ns == "" || dk == "" {
-			return ""
-		}
-		return ct + ":" + ns + ":" + dk
+		// The message ID equals doc._id._data — the MongoDB resume token, which
+		// encodes the exact oplog position of this change event. It is unique
+		// per event and identical across all replicas watching the same stream.
+		return msg.ID()
 	}
 }

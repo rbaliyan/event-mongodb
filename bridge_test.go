@@ -12,67 +12,46 @@ import (
 func TestDedupKeyFromChangeStream(t *testing.T) {
 	keyFn := mongodb.DedupKeyFromChangeStream()
 
-	tests := []struct {
-		name string
-		meta map[string]string
-		want string
-	}{
-		{
-			name: "all fields present",
-			meta: map[string]string{
-				mongodb.MetadataClusterTime: "1234567890",
-				mongodb.MetadataNamespace:   "mydb.orders",
-				mongodb.MetadataDocumentKey: "abc123",
-			},
-			want: "1234567890:mydb.orders:abc123",
-		},
-		{
-			name: "missing cluster_time",
-			meta: map[string]string{
-				mongodb.MetadataNamespace:   "mydb.orders",
-				mongodb.MetadataDocumentKey: "abc123",
-			},
-			want: "",
-		},
-		{
-			name: "missing namespace",
-			meta: map[string]string{
-				mongodb.MetadataClusterTime: "1234567890",
-				mongodb.MetadataDocumentKey: "abc123",
-			},
-			want: "",
-		},
-		{
-			name: "missing document_key",
-			meta: map[string]string{
-				mongodb.MetadataClusterTime: "1234567890",
-				mongodb.MetadataNamespace:   "mydb.orders",
-			},
-			want: "",
-		},
-		{
-			name: "nil metadata",
-			meta: nil,
-			want: "",
-		},
-		{
-			name: "empty metadata",
-			meta: map[string]string{},
-			want: "",
-		},
-	}
+	t.Run("returns message ID", func(t *testing.T) {
+		msg := &fakeMsg{id: "8264BEB9F3...resumetoken", meta: map[string]string{
+			mongodb.MetadataClusterTime: "2024-04-16T22:10:00Z",
+			mongodb.MetadataNamespace:   "mydb.orders",
+			mongodb.MetadataDocumentKey: "abc123",
+		}}
+		got := keyFn(msg)
+		if got != "8264BEB9F3...resumetoken" {
+			t.Errorf("DedupKeyFromChangeStream() = %q, want resume token ID", got)
+		}
+	})
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			msg := &fakeMsg{id: "test", meta: tt.meta}
-			got := keyFn(msg)
-			if got != tt.want {
-				t.Errorf("DedupKeyFromChangeStream() = %q, want %q", got, tt.want)
-			}
-		})
-	}
+	t.Run("two events same second same doc get distinct keys via resume token", func(t *testing.T) {
+		// Simulates two updates within the same second — they have different resume
+		// tokens (different oplog ordinals) so they must not collide.
+		msg1 := &fakeMsg{id: "resumetoken-ordinal-1", meta: map[string]string{
+			mongodb.MetadataClusterTime: "2024-04-16T22:10:00Z",
+			mongodb.MetadataNamespace:   "mydb.calls",
+			mongodb.MetadataDocumentKey: "docid",
+		}}
+		msg2 := &fakeMsg{id: "resumetoken-ordinal-2", meta: map[string]string{
+			mongodb.MetadataClusterTime: "2024-04-16T22:10:00Z", // same second
+			mongodb.MetadataNamespace:   "mydb.calls",
+			mongodb.MetadataDocumentKey: "docid", // same document
+		}}
+		key1 := keyFn(msg1)
+		key2 := keyFn(msg2)
+		if key1 == key2 {
+			t.Errorf("two events in same second must have distinct dedup keys, both got %q", key1)
+		}
+	})
 
-	t.Run("nil message", func(t *testing.T) {
+	t.Run("empty ID returns empty key", func(t *testing.T) {
+		msg := &fakeMsg{id: "", meta: map[string]string{}}
+		if got := keyFn(msg); got != "" {
+			t.Errorf("empty ID: got %q, want empty", got)
+		}
+	})
+
+	t.Run("nil message returns empty key", func(t *testing.T) {
 		if got := keyFn(nil); got != "" {
 			t.Errorf("nil message: got %q, want empty", got)
 		}
