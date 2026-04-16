@@ -27,16 +27,24 @@ const (
 //   - mongodb_oplog_lag_seconds: Histogram of delay from clusterTime to handler execution
 //   - mongodb_handler_duration_seconds: Histogram of handler processing time
 //   - mongodb_changes_pending: Gauge of pending unacked events (callback-based)
+//   - mongodb_stream_active: UpDownCounter of currently open change streams
+//   - mongodb_stream_reconnections_total: Counter of change stream reconnections (attrs: namespace, reason)
+//   - mongodb_stream_receive_lag_seconds: Histogram of delay from clusterTime to transport receive
 type Metrics struct {
 	meter metric.Meter
 
 	// Counters
-	processedTotal metric.Int64Counter
-	failedTotal    metric.Int64Counter
+	processedTotal      metric.Int64Counter
+	failedTotal         metric.Int64Counter
+	reconnectionsTotal  metric.Int64Counter
+
+	// UpDownCounter
+	streamActive metric.Int64UpDownCounter
 
 	// Histograms
 	oplogLag        metric.Float64Histogram
 	handlerDuration metric.Float64Histogram
+	receiveLag      metric.Float64Histogram
 
 	// Observable gauge
 	pendingChanges metric.Int64ObservableGauge
@@ -154,6 +162,35 @@ func NewMetrics(opts ...MetricsOption) (*Metrics, error) {
 		return nil, err
 	}
 
+	// Transport-level instruments
+	m.streamActive, err = meter.Int64UpDownCounter(
+		prefix+"mongodb_stream_active",
+		metric.WithDescription("Number of currently open MongoDB change streams"),
+		metric.WithUnit("{stream}"),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	m.reconnectionsTotal, err = meter.Int64Counter(
+		prefix+"mongodb_stream_reconnections_total",
+		metric.WithDescription("Total number of change stream reconnections"),
+		metric.WithUnit("{reconnection}"),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	m.receiveLag, err = meter.Float64Histogram(
+		prefix+"mongodb_stream_receive_lag_seconds",
+		metric.WithDescription("Delay between MongoDB clusterTime and when the transport received the event, before any handler processing"),
+		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60),
+	)
+	if err != nil {
+		return nil, err
+	}
+
 	// Create observable gauge
 	m.pendingChanges, err = meter.Int64ObservableGauge(
 		prefix+"mongodb_changes_pending",
@@ -201,6 +238,53 @@ func (m *Metrics) SetPendingCallback(fn func() int64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.pendingCallback = fn
+}
+
+// RecordStreamOpened increments the active change stream count for namespace.
+// Called by the transport when a new change stream is successfully opened.
+func (m *Metrics) RecordStreamOpened(ctx context.Context, namespace string) {
+	if m == nil {
+		return
+	}
+	m.streamActive.Add(ctx, 1, metric.WithAttributes(attribute.String("namespace", namespace)))
+}
+
+// RecordStreamClosed decrements the active change stream count for namespace.
+// Called by the transport when a change stream exits (clean close or error).
+func (m *Metrics) RecordStreamClosed(ctx context.Context, namespace string) {
+	if m == nil {
+		return
+	}
+	m.streamActive.Add(ctx, -1, metric.WithAttributes(attribute.String("namespace", namespace)))
+}
+
+// RecordReconnection increments the reconnection counter.
+// reason is "history_lost" when the oplog no longer contains the resume position,
+// or "error" for all other reconnection causes.
+func (m *Metrics) RecordReconnection(ctx context.Context, namespace, reason string) {
+	if m == nil {
+		return
+	}
+	m.reconnectionsTotal.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("namespace", namespace),
+		attribute.String("reason", reason),
+	))
+}
+
+// RecordReceiveLag records the delay between MongoDB clusterTime and when the
+// transport received the event, before any handler processing or channel queuing.
+// This complements mongodb_oplog_lag_seconds (measured at handler execution) by
+// isolating network and oplog propagation latency from handler processing time.
+func (m *Metrics) RecordReceiveLag(ctx context.Context, lagSeconds float64, namespace string) {
+	if m == nil {
+		return
+	}
+	if lagSeconds < 0 {
+		lagSeconds = 0
+	}
+	m.receiveLag.Record(ctx, lagSeconds, metric.WithAttributes(
+		attribute.String("namespace", namespace),
+	))
 }
 
 // Close unregisters the metrics callbacks.

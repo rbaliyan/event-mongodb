@@ -26,7 +26,7 @@ go get github.com/rbaliyan/event-mongodb
 - Flexible payload options (full ChangeEvent or document only)
 - Update description metadata (updated/removed fields) via context
 - Empty update filtering and updated fields size limits
-- OpenTelemetry metrics with subscriber middleware (oplog lag, handler duration, throughput, pending gauge)
+- OpenTelemetry metrics: handler middleware (oplog lag, handler duration, throughput, pending gauge) and transport-level metrics (active stream count, reconnections, receive lag)
 
 ## Usage
 
@@ -55,6 +55,9 @@ orderEvent.Subscribe(ctx, func(ctx context.Context, e event.Event[Order], order 
     fmt.Printf("Order changed: %s\n", order.ID)
     return nil
 })
+
+// Start watching AFTER all subscribers are registered
+transport.Start(ctx)
 ```
 
 ### Watch Levels
@@ -165,10 +168,10 @@ t, _ := mongodb.New(db,
     mongodb.WithoutResume(),
 )
 
-// Start from beginning of oplog on first start (process all available history)
+// Start from a point in the past on first start (process historical events)
 t, _ := mongodb.New(db,
     mongodb.WithCollection("orders"),
-    mongodb.WithStartFromPast(0), // 0 means process all available history
+    mongodb.WithStartFromPast(72*time.Hour), // process up to 72h of available oplog history
 )
 ```
 
@@ -231,11 +234,11 @@ orderEvent.Subscribe(ctx, func(ctx context.Context, e event.Event[Order], order 
 Track which events have been processed:
 
 ```go
-ackStore := mongodb.NewMongoAckStore(
+ackStore, _ := mongodb.NewMongoAckStore(
     internalDB.Collection("_event_acks"),
     24*time.Hour, // TTL for acknowledged events
 )
-ackStore.CreateIndexes(ctx)
+ackStore.EnsureIndexes(ctx)
 
 transport, _ := mongodb.New(db,
     mongodb.WithCollection("orders"),
@@ -309,6 +312,11 @@ metrics, err := mongodb.NewMetrics(
 )
 defer metrics.Close()
 
+// Attach to transport for stream-level metrics (active count, reconnections, receive lag)
+t, _ := mongodb.NewClusterWatch(client,
+    mongodb.WithMetrics(metrics),
+)
+
 // Wire pending gauge to your ack store
 metrics.SetPendingCallback(func() int64 {
     count, _ := db.Collection("_event_acks").CountDocuments(ctx,
@@ -316,7 +324,7 @@ metrics.SetPendingCallback(func() int64 {
     return count
 })
 
-// Use as subscriber middleware
+// Use as subscriber middleware for handler-level metrics
 orderEvent.Subscribe(ctx, handler,
     event.WithMiddleware(mongodb.MetricsMiddleware[mongodb.ChangeEvent](metrics)),
 )
@@ -324,13 +332,20 @@ orderEvent.Subscribe(ctx, handler,
 
 Available metrics:
 
-| Metric | Type | Description |
-|--------|------|-------------|
-| `mongodb_changes_processed_total` | Counter | Events processed successfully (by event, operation, namespace) |
-| `mongodb_changes_failed_total` | Counter | Handler errors (by event, operation, namespace) |
-| `mongodb_oplog_lag_seconds` | Histogram | Delay from MongoDB clusterTime to handler execution |
-| `mongodb_handler_duration_seconds` | Histogram | Handler processing time |
-| `mongodb_changes_pending` | Gauge | Pending unacked events (callback-based) |
+| Metric | Type | Attrs | Description |
+|--------|------|-------|-------------|
+| `mongodb_changes_processed_total` | Counter | event, operation, namespace | Events processed successfully |
+| `mongodb_changes_failed_total` | Counter | event, operation, namespace | Handler errors |
+| `mongodb_oplog_lag_seconds` | Histogram | event, namespace | Delay from clusterTime to **handler execution** |
+| `mongodb_handler_duration_seconds` | Histogram | event, operation, namespace | Handler processing time |
+| `mongodb_changes_pending` | Gauge | — | Pending unacked events (callback-based) |
+| `mongodb_stream_active` | UpDownCounter | namespace | Currently open change streams |
+| `mongodb_stream_reconnections_total` | Counter | namespace, reason | Reconnections (`reason`: `error` \| `history_lost`) |
+| `mongodb_stream_receive_lag_seconds` | Histogram | namespace | Delay from clusterTime to **transport receive** (before handler) |
+
+`mongodb_stream_receive_lag_seconds` vs `mongodb_oplog_lag_seconds`: the receive lag isolates
+network and oplog propagation latency; subtracting it from oplog lag gives handler queuing +
+processing time.
 
 ### Event Lifecycle Observability
 
@@ -344,9 +359,9 @@ For production change stream processing, combine four complementary layers to ac
 | **DLQ** | Permanently failed event capture | Did event X get rejected? What errors are recurring? |
 
 ```
-Change Stream
+Change Stream (WithMetrics) ──► stream_active, reconnections_total
     │
-    ▼
+    ▼ (receive_lag recorded here)
 AckStore.Store(pending)
     │
     ▼
@@ -354,7 +369,7 @@ Monitor middleware ──► pending → completed
     │                         → failed
     │                         → retrying
     ▼
-Metrics middleware ──► counters, histograms, oplog lag
+Metrics middleware ──► processed/failed counters, handler_duration, oplog_lag
     │
     ▼
 Handler
@@ -382,11 +397,11 @@ import (
 monitorStore := monitor.NewMongoStore(internalDB)
 
 // AckStore: delivery guarantee tracking
-ackStore := mongodb.NewMongoAckStore(
+ackStore, _ := mongodb.NewMongoAckStore(
     internalDB.Collection("_event_acks"),
     24*time.Hour,
 )
-ackStore.CreateIndexes(ctx)
+ackStore.EnsureIndexes(ctx)
 
 // DLQ: permanently failed events
 dlqStore := dlq.NewMongoStore(internalDB)
@@ -416,6 +431,7 @@ transport, _ := mongodb.New(db,
     mongodb.WithCollection("orders"),
     mongodb.WithFullDocument(mongodb.FullDocumentUpdateLookup),
     mongodb.WithAckStore(ackStore),
+    mongodb.WithMetrics(metrics), // transport-level: stream count, reconnections, receive lag
 )
 
 bus, _ := event.NewBus("orders", event.WithTransport(transport))
@@ -532,11 +548,12 @@ import (
     "github.com/rbaliyan/event/v3/distributed"
 )
 
-// Create claimer for worker coordination
+// Create state manager for worker coordination
 // Uses MongoDB's atomic findOneAndUpdate for race-condition-free coordination
-claimer := distributed.NewMongoClaimer(internalDB).
-    WithCollection("_order_worker_claims"). // Custom collection name
-    WithCompletionTTL(24 * time.Hour)       // Remember completed messages for 24h
+claimer, _ := distributed.NewMongoStateManager(internalDB,
+    distributed.WithCollection("_order_worker_claims"), // Custom collection name
+    distributed.WithCompletedTTL(24*time.Hour),         // Remember completed messages for 24h
+)
 
 // Create TTL index for automatic cleanup
 claimer.EnsureIndexes(ctx)
@@ -557,7 +574,7 @@ orderChanges.Subscribe(ctx, func(ctx context.Context, ev event.Event[mongodb.Cha
 
     return nil
 }, event.WithMiddleware(
-    distributed.DistributedWorkerMiddleware[mongodb.ChangeEvent](claimer, claimTTL),
+    distributed.WorkerPoolMiddleware[mongodb.ChangeEvent](claimer, claimTTL),
 ))
 ```
 
@@ -566,7 +583,7 @@ orderChanges.Subscribe(ctx, func(ctx context.Context, ev event.Event[mongodb.Cha
 Detect crashed workers and release their claims:
 
 ```go
-recoveryRunner := distributed.NewOrphanRecoveryRunner(claimer,
+recoveryRunner, _ := distributed.NewRecoveryRunner(claimer,
     distributed.WithStaleTimeout(2*time.Minute),   // Message is orphaned if processing > 2min
     distributed.WithCheckInterval(30*time.Second), // Check every 30s
 )
@@ -635,16 +652,17 @@ import (
 )
 
 // 1. Acknowledgment store for at-least-once delivery
-ackStore := mongodb.NewMongoAckStore(
+ackStore, _ := mongodb.NewMongoAckStore(
     internalDB.Collection("_event_acks"),
     24*time.Hour,
 )
-ackStore.CreateIndexes(ctx)
+ackStore.EnsureIndexes(ctx)
 
-// 2. Claimer for WorkerPool emulation
-claimer := distributed.NewMongoClaimer(internalDB).
-    WithCollection("_order_worker_claims").
-    WithCompletionTTL(24 * time.Hour)
+// 2. State manager for WorkerPool emulation
+claimer, _ := distributed.NewMongoStateManager(internalDB,
+    distributed.WithCollection("_order_worker_claims"),
+    distributed.WithCompletedTTL(24*time.Hour),
+)
 claimer.EnsureIndexes(ctx)
 
 // 3. Idempotency store for deduplication
@@ -686,11 +704,11 @@ orderChanges.Subscribe(ctx, func(ctx context.Context, ev event.Event[mongodb.Cha
     idempotencyStore.MarkProcessed(ctx, messageID)
     return nil
 }, event.WithMiddleware(
-    distributed.DistributedWorkerMiddleware[mongodb.ChangeEvent](claimer, claimTTL),
+    distributed.WorkerPoolMiddleware[mongodb.ChangeEvent](claimer, claimTTL),
 ))
 
 // 7. Orphan recovery
-recoveryRunner := distributed.NewOrphanRecoveryRunner(claimer,
+recoveryRunner, _ := distributed.NewRecoveryRunner(claimer,
     distributed.WithStaleTimeout(2*time.Minute),
     distributed.WithCheckInterval(30*time.Second),
 )

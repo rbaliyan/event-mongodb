@@ -36,10 +36,14 @@ MongoDB Change Stream transport (`github.com/rbaliyan/event-mongodb`) for the ev
 **Metrics (metrics.go)** - OpenTelemetry metrics and subscriber middleware:
 - `Metrics` struct with nil-safe methods
 - `NewMetrics(opts...)` constructor with `WithMeterProvider()` and `WithMetricsNamespace()` options
-- `MetricsMiddleware[T](*Metrics)` generic subscriber middleware
-- Counters: `mongodb_changes_processed_total`, `mongodb_changes_failed_total`
-- Histograms: `mongodb_oplog_lag_seconds`, `mongodb_handler_duration_seconds`
+- `MetricsMiddleware[T](*Metrics)` generic subscriber middleware (handler-level metrics)
+- `WithMetrics(m *Metrics)` transport option (transport-level metrics)
+- Handler-level counters: `mongodb_changes_processed_total`, `mongodb_changes_failed_total`
+- Handler-level histograms: `mongodb_oplog_lag_seconds` (clusterTime → handler), `mongodb_handler_duration_seconds`
 - Observable gauge: `mongodb_changes_pending` (callback-based via `SetPendingCallback`)
+- Transport-level UpDownCounter: `mongodb_stream_active` (open streams, attr: namespace)
+- Transport-level counter: `mongodb_stream_reconnections_total` (attrs: namespace, reason=error|history_lost)
+- Transport-level histogram: `mongodb_stream_receive_lag_seconds` (clusterTime → transport receive, before handler)
 - Middleware extracts `cluster_time` from context metadata to compute oplog lag
 - Uses `event.ClassifyError()` for proper error classification (ErrAck = processed, all others = failed)
 - `Close()` unregisters gauge callbacks
@@ -228,9 +232,11 @@ The `WithStartFromPast(duration)` option only applies on FIRST start (when no re
 2. Restart the service
 
 **Recommended monitoring:**
-- Monitor for `ChangeStreamHistoryLost` errors in logs
+- Monitor for `ChangeStreamHistoryLost` errors in logs (`mongodb_stream_reconnections_total{reason="history_lost"}`)
 - Alert when oplog lag approaches retention period
-- Track `mongodb_oplog_lag_seconds` metric for early warning
+- Track `mongodb_stream_receive_lag_seconds` for network/oplog propagation lag
+- Track `mongodb_oplog_lag_seconds` for total end-to-end lag (includes handler queuing)
+- Alert on `mongodb_stream_active` drops to 0 (all streams disconnected)
 
 ## Design Patterns
 
