@@ -1466,7 +1466,7 @@ func (t *Transport) storeAndPublish(event ChangeEvent, msg transport.Message) er
 		return true
 	})
 
-	if publishCount == 0 {
+	if publishCount == 0 && t.isOpen() {
 		t.logger.Warn("storeAndPublish: no registered events to publish to")
 	}
 
