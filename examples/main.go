@@ -348,11 +348,8 @@ func runSchemaTest(ctx context.Context, db *mongo.Database) {
 	// Get retrieves it.
 	got, err := provider.Get(ctx, "order.created")
 	check(label+": Get", err)
-	if got == nil {
-		log.Fatalf("[FAIL] %s: Get returned nil", label)
-	}
-	if got.Version != 1 || got.MaxRetries != 3 {
-		log.Fatalf("[FAIL] %s: schema mismatch: %+v", label, got)
+	if got == nil || got.Version != 1 || got.MaxRetries != 3 {
+		log.Fatalf("[FAIL] %s: expected v1 schema (version=1, maxRetries=3), got %+v", label, got)
 	}
 
 	// Get nonexistent returns nil, nil.
@@ -602,11 +599,8 @@ func runMonitorTest(ctx context.Context, db *mongo.Database) {
 	// Get the entry back.
 	entry, err := ms.Get(ctx, eventID, subID)
 	check(label+": Get", err)
-	if entry == nil {
-		log.Fatalf("[FAIL] %s: Get returned nil entry", label)
-	}
-	if entry.Status != evtmonitor.StatusPending {
-		log.Fatalf("[FAIL] %s: expected StatusPending, got %s", label, entry.Status)
+	if entry == nil || entry.Status != evtmonitor.StatusPending {
+		log.Fatalf("[FAIL] %s: expected StatusPending entry, got %+v", label, entry)
 	}
 
 	// UpdateStatus to completed.
@@ -644,11 +638,8 @@ func runMonitorTest(ctx context.Context, db *mongo.Database) {
 	// Summary — aggregates pending/completed/failed counts per event.
 	summary, err := ms.Summary(ctx, evtmonitor.Filter{})
 	check(label+": Summary", err)
-	if summary == nil {
-		log.Fatalf("[FAIL] %s: Summary returned nil", label)
-	}
-	if summary.TotalEntries != 1 {
-		log.Fatalf("[FAIL] %s: Summary.TotalEntries = %d, want 1", label, summary.TotalEntries)
+	if summary == nil || summary.TotalEntries != 1 {
+		log.Fatalf("[FAIL] %s: expected Summary.TotalEntries=1, got %+v", label, summary)
 	}
 
 	pass(label)
