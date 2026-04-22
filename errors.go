@@ -51,4 +51,3 @@ var (
 	// This wraps ErrInvalidArgument from the shared errors package.
 	ErrFullDocumentRequired = fmt.Errorf("WithFullDocumentOnly requires WithFullDocument: %w", eventerrors.ErrInvalidArgument)
 )
-

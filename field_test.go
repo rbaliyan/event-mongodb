@@ -28,10 +28,10 @@ func TestField_directType(t *testing.T) {
 
 func TestField_numericCoercion(t *testing.T) {
 	tests := []struct {
-		name   string
-		value  any
-		wantI  int64
-		wantF  float64
+		name    string
+		value   any
+		wantI   int64
+		wantF   float64
 		wantI32 int32
 	}{
 		{"float64 (JSON path)", float64(42), 42, 42.0, 42},

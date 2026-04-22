@@ -125,9 +125,9 @@ type transportOptions struct {
 	includeUpdateDescription bool
 	emptyUpdates             bool
 	maxUpdatedFieldsSize     int
-	metrics                  *Metrics // Optional transport-level metrics (stream count, reconnections, receive lag)
+	metrics                  *Metrics                                         // Optional transport-level metrics (stream count, reconnections, receive lag)
 	historyLostCallback      func(ctx context.Context, key string, err error) // Called when oplog history is lost
-	initErr                  error                                             // Deferred error from option functions, checked during New()
+	initErr                  error                                            // Deferred error from option functions, checked during New()
 }
 
 // Transport implements transport.Transport using MongoDB change streams.
@@ -534,6 +534,7 @@ func WithMaxUpdatedFieldsSize(bytes int) Option {
 //	t, err := mongodb.New(db,
 //	    mongodb.WithFullDocument(mongodb.FullDocumentUpdateLookup),
 //	)
+//
 // defaultOptions returns a transportOptions with default values applied.
 func defaultOptions(opts []Option) transportOptions {
 	o := transportOptions{
