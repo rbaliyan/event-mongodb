@@ -138,4 +138,3 @@ func TestStoreSentinelErrors(t *testing.T) {
 		t.Error("ErrCollectionRequired should not be nil")
 	}
 }
-

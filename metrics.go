@@ -34,9 +34,9 @@ type Metrics struct {
 	meter metric.Meter
 
 	// Counters
-	processedTotal      metric.Int64Counter
-	failedTotal         metric.Int64Counter
-	reconnectionsTotal  metric.Int64Counter
+	processedTotal     metric.Int64Counter
+	failedTotal        metric.Int64Counter
+	reconnectionsTotal metric.Int64Counter
 
 	// UpDownCounter
 	streamActive metric.Int64UpDownCounter

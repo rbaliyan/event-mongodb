@@ -374,7 +374,7 @@ func Example_withDistributed() {
 	// Uses MongoDB's atomic findOneAndUpdate for race-condition-free coordination
 	claimer, _ := mongodist.NewMongoStateManager(internalDB,
 		mongodist.WithCollection("_order_worker_claims"), // Custom collection name
-		mongodist.WithCompletedTTL(24*time.Hour),        // Remember completed messages for 24h
+		mongodist.WithCompletedTTL(24*time.Hour),         // Remember completed messages for 24h
 	)
 
 	// Create TTL index for automatic cleanup

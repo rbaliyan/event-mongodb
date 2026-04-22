@@ -39,7 +39,7 @@ type MongoRelay struct {
 	transport        transport.Transport
 	mode             RelayMode
 	pollDelay        time.Duration
-	pollJitter       time.Duration        // Random jitter added to each poll interval to desynchronise pods
+	pollJitter       time.Duration // Random jitter added to each poll interval to desynchronise pods
 	batchSize        int
 	logger           *slog.Logger
 	cleanupAge       time.Duration
