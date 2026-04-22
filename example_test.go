@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/rbaliyan/event-mongodb"
+	mongodist "github.com/rbaliyan/event-mongodb/distributed"
 	"github.com/rbaliyan/event/v3"
 	"github.com/rbaliyan/event/v3/distributed"
 	"github.com/rbaliyan/event/v3/idempotency"
@@ -371,9 +372,9 @@ func Example_withDistributed() {
 
 	// Create claimer for worker coordination
 	// Uses MongoDB's atomic findOneAndUpdate for race-condition-free coordination
-	claimer, _ := distributed.NewMongoStateManager(internalDB,
-		distributed.WithCollection("_order_worker_claims"), // Custom collection name
-		distributed.WithCompletedTTL(24*time.Hour),        // Remember completed messages for 24h
+	claimer, _ := mongodist.NewMongoStateManager(internalDB,
+		mongodist.WithCollection("_order_worker_claims"), // Custom collection name
+		mongodist.WithCompletedTTL(24*time.Hour),        // Remember completed messages for 24h
 	)
 
 	// Create TTL index for automatic cleanup
@@ -520,9 +521,9 @@ func Example_completeSetup() {
 	_ = ackStore.EnsureIndexes(ctx)
 
 	// 2. Claimer for WorkerPool emulation
-	claimer, _ := distributed.NewMongoStateManager(internalDB,
-		distributed.WithCollection("_order_worker_claims"),
-		distributed.WithCompletedTTL(24*time.Hour),
+	claimer, _ := mongodist.NewMongoStateManager(internalDB,
+		mongodist.WithCollection("_order_worker_claims"),
+		mongodist.WithCompletedTTL(24*time.Hour),
 	)
 	_ = claimer.EnsureIndexes(ctx)
 
