@@ -173,6 +173,17 @@ t, _ := mongodb.New(db,
     mongodb.WithCollection("orders"),
     mongodb.WithStartFromPast(72*time.Hour), // process up to 72h of available oplog history
 )
+
+// React when the resume token becomes stale (oplog gap detected)
+// The callback fires before the token is cleared; do NOT block inside it.
+t, _ := mongodb.New(db,
+    mongodb.WithCollection("orders"),
+    mongodb.WithHistoryLostCallback(func(ctx context.Context, key string, err error) {
+        slog.Error("change stream gap: events permanently skipped",
+            "key", key, "error", err)
+        // trigger alerting, metrics, or a full resync here
+    }),
+)
 ```
 
 #### Resetting Resume Tokens
@@ -384,17 +395,18 @@ Handler
 ```go
 import (
     mongodb "github.com/rbaliyan/event-mongodb"
-    "github.com/rbaliyan/event-dlq"
+    mongomonitor "github.com/rbaliyan/event-mongodb/monitor"
+    dlq "github.com/rbaliyan/event-dlq"
     "github.com/rbaliyan/event/v3"
-    "github.com/rbaliyan/event/v3/monitor"
-    "github.com/rbaliyan/event/v3/transport/message"
+    evtmonitor "github.com/rbaliyan/event/v3/monitor"
     monitorhttp "github.com/rbaliyan/event/v3/monitor/http"
 )
 
 // ── 1. Storage layer ──────────────────────────────────
 
 // Monitor: per-event lifecycle (pending/completed/failed/retrying)
-monitorStore := monitor.NewMongoStore(internalDB)
+monitorStore, _ := mongomonitor.NewMongoStore(internalDB)
+monitorStore.EnsureIndexes(ctx)
 
 // AckStore: delivery guarantee tracking
 ackStore, _ := mongodb.NewMongoAckStore(
@@ -404,9 +416,8 @@ ackStore, _ := mongodb.NewMongoAckStore(
 ackStore.EnsureIndexes(ctx)
 
 // DLQ: permanently failed events
-dlqStore := dlq.NewMongoStore(internalDB)
+dlqStore, _ := dlq.NewMongoStore(internalDB)
 dlqStore.EnsureIndexes(ctx)
-dlqManager := dlq.NewManager(dlqStore, transport)
 
 // Metrics: aggregate counters and histograms
 metrics, _ := mongodb.NewMetrics(
@@ -434,49 +445,44 @@ transport, _ := mongodb.New(db,
     mongodb.WithMetrics(metrics), // transport-level: stream count, reconnections, receive lag
 )
 
-bus, _ := event.NewBus("orders", event.WithTransport(transport))
+// ── 3. Bus with DLQ wired at the bus level ────────────
+// WithDLQ routes permanently failed messages (rejected or max retries exhausted)
+// to the dead letter queue automatically. See github.com/rbaliyan/event-dlq for details.
+
+bus, _ := event.NewBus("orders",
+    event.WithTransport(transport),
+    event.WithDLQ(dlq.NewStoreAdapter(dlqStore, "order-service")),
+)
 defer bus.Close(ctx)
 
-// ── 3. Event with DLQ hook ────────────────────────────
+// ── 4. Event ──────────────────────────────────────────
 
 orderChanges := event.New[mongodb.ChangeEvent]("order.changes",
     event.WithMaxRetries(3),
-    event.WithDeadLetterQueue(func(ctx context.Context, msg message.Message, err error) error {
-        return dlqManager.Store(ctx,
-            "order.changes",
-            msg.ID(),
-            msg.Payload(),
-            msg.Metadata(),
-            err,
-            msg.RetryCount(),
-            "order-service",
-        )
-    }),
 )
 event.Register(ctx, bus, orderChanges)
 
-// ── 4. Subscribe with middleware stack ─────────────────
+// ── 5. Subscribe with middleware stack ─────────────────
 
 orderChanges.Subscribe(ctx, handleOrder,
     event.WithMiddleware(
-        monitor.Middleware[mongodb.ChangeEvent](monitorStore),
+        evtmonitor.Middleware[mongodb.ChangeEvent](monitorStore),
         mongodb.MetricsMiddleware[mongodb.ChangeEvent](metrics),
     ),
 )
 
-// ── 5. HTTP API for dashboards ────────────────────────
+// ── 6. HTTP API for dashboards ────────────────────────
 
 mux := http.NewServeMux()
 mux.Handle("/v1/monitor/", monitorhttp.New(monitorStore))
 go http.ListenAndServe(":8081", mux)
 
-// ── 6. Background maintenance ─────────────────────────
+// ── 7. Background maintenance ─────────────────────────
 
 go func() {
     ticker := time.NewTicker(1 * time.Hour)
     for range ticker.C {
         monitorStore.DeleteOlderThan(ctx, 7*24*time.Hour)
-        dlqManager.Cleanup(ctx, 30*24*time.Hour)
     }
 }()
 ```
@@ -545,14 +551,15 @@ This enables:
 
 ```go
 import (
+    mongodist "github.com/rbaliyan/event-mongodb/distributed"
     "github.com/rbaliyan/event/v3/distributed"
 )
 
 // Create state manager for worker coordination
 // Uses MongoDB's atomic findOneAndUpdate for race-condition-free coordination
-claimer, _ := distributed.NewMongoStateManager(internalDB,
-    distributed.WithCollection("_order_worker_claims"), // Custom collection name
-    distributed.WithCompletedTTL(24*time.Hour),         // Remember completed messages for 24h
+claimer, _ := mongodist.NewMongoStateManager(internalDB,
+    mongodist.WithCollection("_order_worker_claims"), // Custom collection name
+    mongodist.WithCompletedTTL(24*time.Hour),         // Remember completed messages for 24h
 )
 
 // Create TTL index for automatic cleanup
@@ -646,6 +653,7 @@ Combine all features for production-ready setup:
 ```go
 import (
     mongodb "github.com/rbaliyan/event-mongodb"
+    mongodist "github.com/rbaliyan/event-mongodb/distributed"
     "github.com/rbaliyan/event/v3"
     "github.com/rbaliyan/event/v3/distributed"
     "github.com/rbaliyan/event/v3/idempotency"
@@ -659,9 +667,9 @@ ackStore, _ := mongodb.NewMongoAckStore(
 ackStore.EnsureIndexes(ctx)
 
 // 2. State manager for WorkerPool emulation
-claimer, _ := distributed.NewMongoStateManager(internalDB,
-    distributed.WithCollection("_order_worker_claims"),
-    distributed.WithCompletedTTL(24*time.Hour),
+claimer, _ := mongodist.NewMongoStateManager(internalDB,
+    mongodist.WithCollection("_order_worker_claims"),
+    mongodist.WithCompletedTTL(24*time.Hour),
 )
 claimer.EnsureIndexes(ctx)
 
