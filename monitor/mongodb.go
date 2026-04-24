@@ -831,6 +831,60 @@ func (s *MongoStore) Summary(ctx context.Context, filter evtmonitor.Filter) (*ev
 	return summary, nil
 }
 
+// StuckPendingCount returns the number of entries that have been in "pending"
+// status for longer than olderThan. The query uses the {status, started_at}
+// index prefix so it does not scan the full collection.
+func (s *MongoStore) StuckPendingCount(ctx context.Context, olderThan time.Duration) (int64, error) {
+	cutoff := time.Now().Add(-olderThan)
+	filter := bson.M{
+		"status":     string(evtmonitor.StatusPending),
+		"started_at": bson.M{"$lt": cutoff},
+	}
+	count, err := s.collection.CountDocuments(ctx, filter)
+	if err != nil {
+		return 0, fmt.Errorf("stuck pending count: %w", err)
+	}
+	return count, nil
+}
+
+// StuckPendingEntries returns up to limit entries that have been in "pending"
+// status for longer than olderThan, sorted oldest-first. If limit <= 0, it
+// defaults to 10. The query uses the {status, started_at} index prefix.
+func (s *MongoStore) StuckPendingEntries(ctx context.Context, olderThan time.Duration, limit int) ([]*evtmonitor.Entry, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	cutoff := time.Now().Add(-olderThan)
+	filter := bson.M{
+		"status":     string(evtmonitor.StatusPending),
+		"started_at": bson.M{"$lt": cutoff},
+	}
+	findOpts := options.Find().
+		SetSort(bson.D{{Key: "started_at", Value: 1}}).
+		SetLimit(int64(limit))
+
+	cursor, err := s.collection.Find(ctx, filter, findOpts)
+	if err != nil {
+		return nil, fmt.Errorf("stuck pending entries: %w", err)
+	}
+	defer func() { _ = cursor.Close(ctx) }()
+
+	var entries []*evtmonitor.Entry
+	for cursor.Next(ctx) {
+		var doc mongoEntry
+		if err := cursor.Decode(&doc); err != nil {
+			return nil, fmt.Errorf("decode stuck entry: %w", err)
+		}
+		entries = append(entries, doc.toEntry())
+	}
+	if err := cursor.Err(); err != nil {
+		return nil, fmt.Errorf("stuck pending cursor: %w", err)
+	}
+
+	return entries, nil
+}
+
 // Compile-time checks that MongoStore implements the required interfaces.
 var _ evtmonitor.Store = (*MongoStore)(nil)
 var _ evtmonitor.SummaryProvider = (*MongoStore)(nil)
+var _ evtmonitor.StuckPendingProvider = (*MongoStore)(nil)
