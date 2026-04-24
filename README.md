@@ -845,9 +845,31 @@ fmt.Printf("Pending: %d, Inflight: %d, Acked: %d\n",
     stats.Pending, stats.Inflight, stats.Acked)
 ```
 
+## Transport Interface Support
+
+| Method | Supported | Notes |
+|--------|-----------|-------|
+| `Subscribe` | ✅ | Core feature — all change types delivered |
+| `RegisterEvent` | ✅ | Registers internal routing resources |
+| `UnregisterEvent` | ✅ | Tears down routing resources |
+| `Health` | ✅ | Pings MongoDB and reports stream status |
+| `Close` | ✅ | Stops all watchers gracefully |
+| `Publish` | ❌ | Returns `ErrPublishNotSupported` — write to MongoDB directly instead |
+
+`Publish` is intentionally unsupported because events originate from MongoDB change streams, not from callers. Write your documents to MongoDB using the standard driver and the transport will deliver the change to all subscribers automatically.
+
+When writing generic code that calls `Publish`, guard the error:
+
+```go
+err := transport.Publish(ctx, name, msg)
+if errors.Is(err, mongodb.ErrPublishNotSupported) {
+    // OK — this transport is read-only; writes happen via MongoDB driver
+    return nil
+}
+```
+
 ## Limitations
 
-- `Publish()` is not supported - changes are triggered by database writes
 - Only Broadcast delivery mode (all subscribers receive all changes)
 - Requires MongoDB replica set or sharded cluster
 
