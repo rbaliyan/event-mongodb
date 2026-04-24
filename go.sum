@@ -39,8 +39,8 @@ github.com/ncruces/go-strftime v1.0.0 h1:HMFp8mLCTPp341M/ZnA4qaf7ZlsbTc+miZjCLOF
 github.com/ncruces/go-strftime v1.0.0/go.mod h1:Fwc5htZGVVkseilnfgOVb9mKy6w1naJmn9CehxcKcls=
 github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
-github.com/rbaliyan/event/v3 v3.16.0 h1:aQzmMKgGImrvRiG9IwdBBr7Nek1AZfhMYXU5xqBFh2Q=
-github.com/rbaliyan/event/v3 v3.16.0/go.mod h1:ca1C/uRbDthv3j/E2bhKfVsZygVP9ulwZqe04PVo6aQ=
+github.com/rbaliyan/event/v3 v3.16.4 h1:N5a55uJBaS8XOspfI+q2tOeS6mjh+7zzmOOmr+YT28A=
+github.com/rbaliyan/event/v3 v3.16.4/go.mod h1:ca1C/uRbDthv3j/E2bhKfVsZygVP9ulwZqe04PVo6aQ=
 github.com/redis/go-redis/v9 v9.18.0 h1:pMkxYPkEbMPwRdenAzUNyFNrDgHx9U+DrBabWNfSRQs=
 github.com/redis/go-redis/v9 v9.18.0/go.mod h1:k3ufPphLU5YXwNTUcCRXGxUoF1fqxnhFQmscfkCoDA0=
 github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec h1:W09IVJc94icq4NjY3clb7Lk8O1qJ8BdBEF8z0ibU0rE=
