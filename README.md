@@ -128,6 +128,9 @@ allChanges.Subscribe(ctx, func(ctx context.Context, ev event.Event[mongodb.Chang
         return nil
     }
 })
+
+// Start watching AFTER all subscribers are registered
+transport.Start(ctx)
 ```
 
 This pattern only works with `event.New[mongodb.ChangeEvent]` because every change decodes successfully into `ChangeEvent`. Using typed structs like `event.New[Order]` on a database-level bus will cause decode failures for non-order collections.
@@ -202,7 +205,7 @@ fmt.Printf("Token key: %s\n", key)
 ```
 
 After resetting, the next restart will:
-- Start from the beginning of oplog (if `WithStartFromPast` was set)
+- Resume from the duration specified in `WithStartFromPast` (falling back to the current position if the oplog window has been exceeded)
 - Start from the current position (default behavior)
 
 ### Full Document Options
@@ -305,6 +308,48 @@ pipeline := mongo.Pipeline{
 transport, _ := mongodb.New(db,
     mongodb.WithCollection("orders"),
     mongodb.WithPipeline(pipeline),
+)
+```
+
+### Operation-Type Filtering (EventType)
+
+`EventType` maps CRUD intent to MongoDB operation types and returns a pre-decode message filter, so messages of unwanted operation types are discarded before the payload is decoded:
+
+```go
+// Only deliver insert events to this subscriber
+orderCreated := event.New[Order]("order.created",
+    event.WithPayloadCodec(payload.BSON{}),
+    event.WithMessageFilter(mongodb.EventCreated.MessageFilter()),
+)
+
+// EventUpdated covers both update and replace operations
+orderUpdated := event.New[Order]("order.updated",
+    event.WithMessageFilter(mongodb.EventUpdated.MessageFilter()),
+)
+```
+
+Available event types: `EventCreated` (insert), `EventUpdated` (update + replace), `EventDeleted` (delete).
+
+### Document Coalescing
+
+`CoalesceByDocumentKey[T]()` is a subscribe option that coalesces multiple pending changes to the same document into a single handler invocation. Superseded messages are auto-acknowledged, so only the latest change is delivered. This is efficient because coalescing uses message metadata (no payload decode for dropped messages):
+
+```go
+// Cache invalidation: only the latest state matters
+orderEvent.Subscribe(ctx, handler,
+    mongodb.CoalesceByDocumentKey[Order](),
+)
+```
+
+### Bridge Deduplication
+
+When using the [bridge](https://github.com/rbaliyan/event/tree/main/transport/bridge) transport to fan out change stream events to another transport (e.g. Redis Streams), use `DedupKeyFromChangeStream()` to derive a stable deduplication key from the resume token. This prevents duplicate delivery when multiple bridge replicas watch the same change stream:
+
+```go
+t, _ := bridge.New(source, sink,
+    bridge.WithMiddleware(
+        bridge.Dedup(coord, mongodb.DedupKeyFromChangeStream(), 24*time.Hour),
+    ),
 )
 ```
 
@@ -471,13 +516,16 @@ orderChanges.Subscribe(ctx, handleOrder,
     ),
 )
 
-// ── 6. HTTP API for dashboards ────────────────────────
+// ── 6. Start watching AFTER all subscribers are registered ────────────
+transport.Start(ctx)
+
+// ── 7. HTTP API for dashboards ────────────────────────
 
 mux := http.NewServeMux()
 mux.Handle("/v1/monitor/", monitorhttp.New(monitorStore))
 go http.ListenAndServe(":8081", mux)
 
-// ── 7. Background maintenance ─────────────────────────
+// ── 8. Background maintenance ─────────────────────────
 
 go func() {
     ticker := time.NewTicker(1 * time.Hour)
@@ -507,7 +555,7 @@ func diagnoseEvent(ctx context.Context, eventID string) {
             dlqMsg.Error, dlqMsg.RetryCount, dlqMsg.CreatedAt)
     }
 
-    // 4. AckStore: list all pending events for dashboards
+    // 3. AckStore: list all pending events for dashboards
     if qs, ok := any(ackStore).(mongodb.AckQueryStore); ok {
         pending, _ := qs.Count(ctx, mongodb.AckFilter{
             Status: mongodb.AckStatusPending,
@@ -540,7 +588,7 @@ GET /v1/monitor/entries/{eventID}
 
 ## Integration with distributed package
 
-MongoDB change streams are Broadcast-only (all subscribers receive all changes). The [distributed](https://github.com/rbaliyan/event/tree/main/distributed) package provides `DistributedWorkerMiddleware` that uses atomic database claiming to emulate WorkerPool semantics.
+MongoDB change streams are Broadcast-only (all subscribers receive all changes). The [distributed](https://github.com/rbaliyan/event/tree/main/distributed) package provides `WorkerPoolMiddleware` that uses atomic database claiming to emulate WorkerPool semantics.
 
 This enables:
 - Load balancing across multiple application instances
@@ -572,6 +620,11 @@ claimer.EnsureIndexes(ctx)
 // Claim TTL should exceed your handler's maximum processing time
 claimTTL := 5 * time.Minute
 
+poolMW, err := distributed.WorkerPoolMiddleware[mongodb.ChangeEvent](claimer, claimTTL)
+if err != nil {
+    log.Fatal("worker pool middleware:", err)
+}
+
 orderChanges.Subscribe(ctx, func(ctx context.Context, ev event.Event[mongodb.ChangeEvent], change mongodb.ChangeEvent) error {
     fmt.Printf("Processing: %s %s\n", change.OperationType, change.DocumentKey)
 
@@ -580,9 +633,7 @@ orderChanges.Subscribe(ctx, func(ctx context.Context, ev event.Event[mongodb.Cha
     // and another worker can pick it up
 
     return nil
-}, event.WithMiddleware(
-    distributed.WorkerPoolMiddleware[mongodb.ChangeEvent](claimer, claimTTL),
-))
+}, event.WithMiddleware(poolMW))
 ```
 
 ### Orphan Recovery
@@ -697,6 +748,11 @@ event.Register(ctx, bus, orderChanges)
 // 6. Handler with full middleware stack
 claimTTL := 5 * time.Minute
 
+poolMW, err := distributed.WorkerPoolMiddleware[mongodb.ChangeEvent](claimer, claimTTL)
+if err != nil {
+    log.Fatal("worker pool middleware:", err)
+}
+
 orderChanges.Subscribe(ctx, func(ctx context.Context, ev event.Event[mongodb.ChangeEvent], change mongodb.ChangeEvent) error {
     // Idempotency check
     messageID := change.ID
@@ -711,11 +767,12 @@ orderChanges.Subscribe(ctx, func(ctx context.Context, ev event.Event[mongodb.Cha
     // Mark processed
     idempotencyStore.MarkProcessed(ctx, messageID)
     return nil
-}, event.WithMiddleware(
-    distributed.WorkerPoolMiddleware[mongodb.ChangeEvent](claimer, claimTTL),
-))
+}, event.WithMiddleware(poolMW))
 
-// 7. Orphan recovery
+// 7. Start watching AFTER all subscribers are registered
+transport.Start(ctx)
+
+// 8. Orphan recovery
 recoveryRunner, _ := distributed.NewRecoveryRunner(claimer,
     distributed.WithStaleTimeout(2*time.Minute),
     distributed.WithCheckInterval(30*time.Second),

@@ -834,6 +834,9 @@ func (s *MongoStore) Summary(ctx context.Context, filter evtmonitor.Filter) (*ev
 // StuckPendingCount returns the number of entries that have been in "pending"
 // status for longer than olderThan. The query uses the {status, started_at}
 // index prefix so it does not scan the full collection.
+//
+// This method is intended for background polling (e.g. system view refresh).
+// Do not call it on every HTTP request — cache the result.
 func (s *MongoStore) StuckPendingCount(ctx context.Context, olderThan time.Duration) (int64, error) {
 	cutoff := time.Now().Add(-olderThan)
 	filter := bson.M{
@@ -850,6 +853,9 @@ func (s *MongoStore) StuckPendingCount(ctx context.Context, olderThan time.Durat
 // StuckPendingEntries returns up to limit entries that have been in "pending"
 // status for longer than olderThan, sorted oldest-first. If limit <= 0, it
 // defaults to 10. The query uses the {status, started_at} index prefix.
+//
+// This method is intended for background polling (e.g. system view refresh).
+// Do not call it on every HTTP request — cache the result.
 func (s *MongoStore) StuckPendingEntries(ctx context.Context, olderThan time.Duration, limit int) ([]*evtmonitor.Entry, error) {
 	if limit <= 0 {
 		limit = 10
