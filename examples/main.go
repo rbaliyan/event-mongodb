@@ -988,14 +988,16 @@ func runWorkerPoolExample() {
 	}
 
 	claimTTL := 5 * time.Minute
+	poolMW, err := distributed.WorkerPoolMiddleware[mongodb.ChangeEvent](claimer, claimTTL)
+	if err != nil {
+		log.Fatal("worker pool middleware:", err)
+	}
 	err = orderChanges.Subscribe(ctx, func(ctx context.Context, ev event.Event[mongodb.ChangeEvent], change mongodb.ChangeEvent) error {
 		fmt.Printf("[%s] processing %s: %s\n", instanceID, change.OperationType, change.DocumentKey)
 		time.Sleep(100 * time.Millisecond)
 		fmt.Printf("[%s] done: %s\n", instanceID, change.DocumentKey)
 		return nil
-	}, event.WithMiddleware(
-		distributed.WorkerPoolMiddleware[mongodb.ChangeEvent](claimer, claimTTL),
-	))
+	}, event.WithMiddleware(poolMW))
 	if err != nil {
 		log.Fatal("subscribe:", err)
 	}
@@ -1183,8 +1185,12 @@ func runFullSetupExample() {
 		return nil
 	}
 
+	poolMW2, err := distributed.WorkerPoolMiddleware[mongodb.ChangeEvent](claimer, claimTTL)
+	if err != nil {
+		log.Fatal("worker pool middleware:", err)
+	}
 	err = orderChanges.Subscribe(ctx, handler,
-		event.WithMiddleware(distributed.WorkerPoolMiddleware[mongodb.ChangeEvent](claimer, claimTTL)),
+		event.WithMiddleware(poolMW2),
 	)
 	if err != nil {
 		log.Fatal("subscribe:", err)
