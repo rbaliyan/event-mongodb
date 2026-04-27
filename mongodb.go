@@ -534,20 +534,6 @@ func WithMaxUpdatedFieldsSize(bytes int) Option {
 //	t, err := mongodb.New(db,
 //	    mongodb.WithFullDocument(mongodb.FullDocumentUpdateLookup),
 //	)
-//
-// defaultOptions returns a transportOptions with default values applied.
-func defaultOptions(opts []Option) transportOptions {
-	o := transportOptions{
-		logger:     transport.Logger("transport>mongodb"),
-		onError:    func(error) {},
-		bufferSize: 100,
-	}
-	for _, opt := range opts {
-		opt(&o)
-	}
-	return o
-}
-
 func New(db *mongo.Database, opts ...Option) (*Transport, error) {
 	if db == nil {
 		return nil, ErrDatabaseRequired
@@ -582,6 +568,19 @@ func New(db *mongo.Database, opts ...Option) (*Transport, error) {
 	}
 
 	return t, nil
+}
+
+// defaultOptions returns a transportOptions with default values applied.
+func defaultOptions(opts []Option) transportOptions {
+	o := transportOptions{
+		logger:     transport.Logger("transport>mongodb"),
+		onError:    func(error) {},
+		bufferSize: 100,
+	}
+	for _, opt := range opts {
+		opt(&o)
+	}
+	return o
 }
 
 // NewClusterWatch creates a MongoDB transport that watches all databases.
@@ -713,9 +712,6 @@ func (t *Transport) RegisterEvent(ctx context.Context, name string) error {
 
 	// Track registered event name
 	t.registeredEvents.Store(name, struct{}{})
-
-	// Note: watcher is started in Subscribe() to avoid race condition where
-	// historical events (from WithStartFromPast) are dropped before subscribers exist.
 
 	t.logger.Debug("registered event", "event", name, "collection", t.collectionName)
 	return nil

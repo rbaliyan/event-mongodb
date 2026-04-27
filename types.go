@@ -13,10 +13,14 @@ import (
 type OperationType string
 
 const (
-	OperationInsert  OperationType = "insert"
-	OperationUpdate  OperationType = "update"
+	// OperationInsert represents a document insert operation.
+	OperationInsert OperationType = "insert"
+	// OperationUpdate represents a document update operation (partial field changes).
+	OperationUpdate OperationType = "update"
+	// OperationReplace represents a full document replacement operation.
 	OperationReplace OperationType = "replace"
-	OperationDelete  OperationType = "delete"
+	// OperationDelete represents a document delete operation.
+	OperationDelete OperationType = "delete"
 )
 
 // FullDocumentOption specifies how to return full documents in change events.

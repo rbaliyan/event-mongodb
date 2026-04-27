@@ -401,6 +401,7 @@ func Example_withDistributed() {
 	// 1. Atomic claiming (only one worker processes each message)
 	// 2. Completion tracking (prevents reprocessing)
 	// 3. Failure handling (releases claim for retry on error)
+	poolMW, _ := distributed.WorkerPoolMiddleware[mongodb.ChangeEvent](claimer, claimTTL)
 	_ = orderChanges.Subscribe(ctx, func(ctx context.Context, ev event.Event[mongodb.ChangeEvent], change mongodb.ChangeEvent) error {
 		fmt.Printf("Processing: %s %s\n", change.OperationType, change.DocumentKey)
 
@@ -409,9 +410,7 @@ func Example_withDistributed() {
 		// and another worker can pick it up
 
 		return nil
-	}, event.WithMiddleware(
-		distributed.WorkerPoolMiddleware[mongodb.ChangeEvent](claimer, claimTTL),
-	))
+	}, event.WithMiddleware(poolMW))
 
 	// Optional: Set up orphan recovery
 	// Detects workers that crashed and releases their claims
@@ -554,6 +553,7 @@ func Example_completeSetup() {
 
 	// 6. Handler with full middleware stack
 	claimTTL := 5 * time.Minute
+	poolMW, _ := distributed.WorkerPoolMiddleware[mongodb.ChangeEvent](claimer, claimTTL)
 
 	_ = orderChanges.Subscribe(ctx, func(ctx context.Context, ev event.Event[mongodb.ChangeEvent], change mongodb.ChangeEvent) error {
 		// Additional idempotency check
@@ -569,9 +569,7 @@ func Example_completeSetup() {
 		// Mark processed
 		_ = idempotencyStore.MarkProcessed(ctx, messageID)
 		return nil
-	}, event.WithMiddleware(
-		distributed.WorkerPoolMiddleware[mongodb.ChangeEvent](claimer, claimTTL),
-	))
+	}, event.WithMiddleware(poolMW))
 
 	// 7. Orphan recovery
 	recoveryRunner, _ := distributed.NewRecoveryRunner(claimer,

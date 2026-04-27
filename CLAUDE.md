@@ -53,6 +53,8 @@ MongoDB Change Stream transport (`github.com/rbaliyan/event-mongodb`) for the ev
 - Metrics middleware (`MetricsMiddleware`): aggregate throughput, latency, error rates via OpenTelemetry
 - DLQ (`event-dlq`): capture permanently failed events for replay
 - `AckQueryStore` interface extends `AckStore` with `List`/`Count` for monitoring pending events
+- `monitor.MongoStore` implements `evtmonitor.StuckPendingProvider` (`StuckPendingCount` and `StuckPendingEntries`), enabling stuck-pending detection from the monitor HTTP handler via `WithStuckPendingProvider`
+- `monitor.MongoStore` implements `evtmonitor.SummaryProvider` (`Summary`), enabling aggregate status counts and per-event statistics from the monitor HTTP handler
 
 **Persistent Store (persistent/)** - Composite transport support:
 - `Store`: Implements `persistent.Store` for durable message storage
@@ -171,7 +173,7 @@ Metadata keys are exported constants: `MetadataUpdatedFields`, `MetadataRemovedF
 - Default: First start saves initial position to skip historical oplog
 
 **Resume Token Options:**
-- `WithStartFromBeginning()`: On first start (no token), process all available oplog history instead of starting from current position
+- `WithStartFromPast(d time.Duration)`: On first start (no token), start from the specified duration in the past to process available oplog history instead of the current position
 - `WithoutResume()`: Disable resume token persistence entirely
 - `WithResumeTokenID(id)`: Set custom ID for token key (default: hostname)
 - `WithResumeTokenStore(store)`: Use custom storage backend
@@ -213,17 +215,17 @@ if err := transport.ResetResumeToken(ctx); err != nil {
 
 **Direct MongoDB token operations:**
 
-Resume tokens are stored in the `_event_resume_tokens_GLOBAL` collection in the `event_internal` database by default. The key format is `*.*:{resumeTokenID}:{collection}`.
+Resume tokens are stored in the `_event_resume_tokens` collection in the same database passed to `mongodb.New()` (or the `admin` database for cluster-level watches). The key format is `{namespace}:{resumeTokenID}`, for example `mydb.orders:hostname` for a collection-level watch.
 
 ```javascript
 // Check stored tokens
-db.getCollection("_event_resume_tokens_GLOBAL").find({});
+db.getCollection("_event_resume_tokens").find({});
 
 // Delete token for a specific collection
-db.getCollection("_event_resume_tokens_GLOBAL").deleteMany({_id: /collection_name/});
+db.getCollection("_event_resume_tokens").deleteMany({_id: /orders/});
 
 // Delete all tokens
-db.getCollection("_event_resume_tokens_GLOBAL").deleteMany({});
+db.getCollection("_event_resume_tokens").deleteMany({});
 ```
 
 **WithStartFromPast behavior:**
