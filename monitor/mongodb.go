@@ -640,6 +640,36 @@ func (s *MongoStore) RecordComplete(ctx context.Context, params event.RecordComp
 	return s.UpdateStatus(ctx, params.EventID, params.SubscriptionID, evtmonitor.Status(params.Status), params.Error, params.Duration)
 }
 
+// RecordPublish records a producer-side publish milestone.
+// Implements event.PublishAuditStore by writing an Entry with
+// Status == StatusPublished and SubscriptionID == PublishMarker into the same
+// collection as handler entries, so a single GetByEventID returns the full
+// lineage (publish + every subscriber that processed it).
+//
+// The entry is keyed under (EventID, PublishMarker), which cannot collide
+// with real subscription IDs (random base32 strings) or WorkerPool entries
+// (whose subscription_id is empty after the fromEntry transform). Publishing
+// the same event twice silently overwrites — at-least-once semantics from
+// outbox relays make this safe.
+func (s *MongoStore) RecordPublish(ctx context.Context, params event.RecordPublishParams) error {
+	now := time.Now()
+	entry := &evtmonitor.Entry{
+		EventID:        params.EventID,
+		SubscriptionID: evtmonitor.PublishMarker,
+		EventName:      params.EventName,
+		BusID:          params.BusID,
+		InstanceID:     params.BusName,
+		DeliveryMode:   evtmonitor.Broadcast,
+		Metadata:       params.Metadata,
+		Status:         evtmonitor.StatusPublished,
+		StartedAt:      now,
+		CompletedAt:    &now,
+		TraceID:        params.TraceID,
+		SpanID:         params.SpanID,
+	}
+	return s.Record(ctx, entry)
+}
+
 // Summary returns aggregated statistics using a MongoDB $facet aggregation pipeline.
 //
 // oldest/newest are fetched via separate index-backed FindOne calls rather than
@@ -894,3 +924,4 @@ func (s *MongoStore) StuckPendingEntries(ctx context.Context, olderThan time.Dur
 var _ evtmonitor.Store = (*MongoStore)(nil)
 var _ evtmonitor.SummaryProvider = (*MongoStore)(nil)
 var _ evtmonitor.StuckPendingProvider = (*MongoStore)(nil)
+var _ event.PublishAuditStore = (*MongoStore)(nil)
