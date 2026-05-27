@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"sync/atomic"
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -99,9 +100,16 @@ func (s *MongoResumeTokenStore) Indexes() []mongo.IndexModel {
 
 // MongoAckStore implements AckStore using a MongoDB collection.
 // It tracks which change events have been acknowledged for at-least-once delivery.
+//
+// pending is a local atomic counter of events Store()d but not yet Ack()d by
+// this process. It enables a cheap PendingCount() that avoids querying MongoDB
+// on every metrics scrape. The counter is per-instance: in multi-instance
+// deployments each process tracks only the events it stored; summing the gauge
+// across instances (e.g. via Prometheus) yields the cluster-wide total.
 type MongoAckStore struct {
 	collection *mongo.Collection
 	ttl        time.Duration
+	pending    atomic.Int64
 }
 
 // ackDoc represents a pending acknowledgment document.
@@ -143,21 +151,51 @@ func (s *MongoAckStore) Store(ctx context.Context, eventID string) error {
 		ID:        eventID,
 		CreatedAt: time.Now(),
 	})
-	// Ignore duplicate key errors (event already stored)
+	// Ignore duplicate key errors (event already stored) without bumping the
+	// pending counter — the original Store() already accounted for it.
 	if mongo.IsDuplicateKeyError(err) {
 		return nil
+	}
+	if err == nil {
+		s.pending.Add(1)
 	}
 	return err
 }
 
 // Ack marks an event as acknowledged.
+//
+// The pending counter is decremented only when a previously-pending document is
+// transitioned to acked. Re-acking an already-acked event (MatchedCount == 1
+// but ModifiedCount == 0) and acking a non-existent event (MatchedCount == 0)
+// both leave the counter unchanged so it stays consistent with the collection.
 func (s *MongoAckStore) Ack(ctx context.Context, eventID string) error {
-	_, err := s.collection.UpdateOne(
+	res, err := s.collection.UpdateOne(
 		ctx,
-		bson.M{"_id": eventID},
+		bson.M{"_id": eventID, "acked_at": time.Time{}},
 		bson.M{"$set": bson.M{"acked_at": time.Now()}},
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	if res != nil && res.ModifiedCount > 0 {
+		s.pending.Add(-1)
+	}
+	return nil
+}
+
+// PendingCount returns the number of events stored by this process that have
+// not yet been acknowledged.
+//
+// This is an in-memory counter; it does not query MongoDB and is safe to call
+// at high frequency (e.g. from a Prometheus gauge callback). Note that the
+// counter is process-local: it reflects only events that this MongoAckStore
+// instance Store()d and has not yet Ack()d. For a cluster-wide pending total
+// in multi-instance deployments, sum the per-process gauge across instances
+// (the typical Prometheus pattern) or use Count(AckFilter{Status:
+// AckStatusPending}) — which is now index-backed thanks to the partial index
+// on acked_at (see Indexes).
+func (s *MongoAckStore) PendingCount() int64 {
+	return s.pending.Load()
 }
 
 // EnsureIndexes creates the necessary indexes for the ack store.
@@ -169,6 +207,14 @@ func (s *MongoAckStore) EnsureIndexes(ctx context.Context) error {
 
 // Indexes returns the index models for manual creation.
 // Use this if you prefer to manage indexes separately (e.g., via migrations).
+//
+// The two acked_at indexes are intentionally asymmetric. The TTL index covers
+// only acked documents (acked_at > epoch) so MongoDB can age them out after
+// ttl. The "pending" index covers only pending documents (acked_at == epoch)
+// so the buildAckFilter(AckStatusPending) query — { acked_at: { $eq: epoch } }
+// — can be served from an index instead of a full collection scan. Without
+// the pending index a count of un-acked events grows linearly with collection
+// size and can drive query-targeting alerts.
 func (s *MongoAckStore) Indexes() []mongo.IndexModel {
 	return []mongo.IndexModel{
 		{
@@ -178,6 +224,12 @@ func (s *MongoAckStore) Indexes() []mongo.IndexModel {
 			Keys: bson.D{{Key: "acked_at", Value: 1}},
 			Options: options.Index().SetExpireAfterSeconds(int32(s.ttl.Seconds())).
 				SetPartialFilterExpression(bson.M{"acked_at": bson.M{"$gt": time.Time{}}}),
+		},
+		{
+			Keys: bson.D{{Key: "acked_at", Value: 1}},
+			Options: options.Index().
+				SetName("acked_at_pending").
+				SetPartialFilterExpression(bson.M{"acked_at": bson.M{"$eq": time.Time{}}}),
 		},
 	}
 }
