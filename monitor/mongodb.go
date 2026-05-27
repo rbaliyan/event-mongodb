@@ -140,6 +140,7 @@ func fromEntry(e *evtmonitor.Entry) *mongoEntry {
 // MongoStore is a MongoDB-based monitor store.
 type MongoStore struct {
 	collection *mongo.Collection
+	ttl        time.Duration
 }
 
 // NewMongoStore creates a new MongoDB monitor store.
@@ -165,6 +166,23 @@ func (s *MongoStore) WithCollection(name string) *MongoStore {
 	return s
 }
 
+// WithTTL configures a server-side TTL on the started_at field so MongoDB
+// automatically evicts monitor entries older than ttl. When set, the next
+// EnsureIndexes call adds a TTL index (started_at_ttl) alongside the existing
+// indexes returned by Indexes().
+//
+// A non-positive ttl clears any previously configured TTL (the TTL index is
+// not dropped automatically; remove it manually if needed).
+//
+// Server-side TTL is preferred over the application-driven DeleteOlderThan
+// sweep for high-throughput collections because it bounds the working set
+// continuously rather than in periodic batches, which directly reduces the
+// docs-examined cost of working-set aggregations such as Summary.
+func (s *MongoStore) WithTTL(ttl time.Duration) *MongoStore {
+	s.ttl = ttl
+	return s
+}
+
 // Collection returns the underlying MongoDB collection.
 func (s *MongoStore) Collection() *mongo.Collection {
 	return s.collection
@@ -173,12 +191,16 @@ func (s *MongoStore) Collection() *mongo.Collection {
 // Indexes returns the required indexes for the monitor collection.
 // Users can use this to create indexes manually or merge with their own indexes.
 //
+// When a TTL has been configured via WithTTL, the slice includes an extra
+// started_at TTL index that drives server-side eviction. Otherwise the slice
+// only contains the query-coverage indexes.
+//
 // Example:
 //
 //	indexes := store.Indexes()
 //	_, err := collection.Indexes().CreateMany(ctx, indexes)
 func (s *MongoStore) Indexes() []mongo.IndexModel {
-	return []mongo.IndexModel{
+	indexes := []mongo.IndexModel{
 		// Unique constraint: primary key for upserts, point lookups, and status updates.
 		{
 			Keys:    bson.D{{Key: "event_id", Value: 1}, {Key: "subscription_id", Value: 1}},
@@ -225,6 +247,21 @@ func (s *MongoStore) Indexes() []mongo.IndexModel {
 			},
 		},
 	}
+
+	// Optional TTL on started_at — driven by WithTTL. Kept as a separate
+	// single-key index (rather than retrofitting expireAfterSeconds on the
+	// compound index above) so it can be added or removed without rebuilding
+	// the cursor-coverage index.
+	if s.ttl > 0 {
+		indexes = append(indexes, mongo.IndexModel{
+			Keys: bson.D{{Key: "started_at", Value: 1}},
+			Options: options.Index().
+				SetName("started_at_ttl").
+				SetExpireAfterSeconds(int32(s.ttl.Seconds())),
+		})
+	}
+
+	return indexes
 }
 
 // EnsureIndexes creates the required indexes for the monitor collection.
