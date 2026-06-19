@@ -126,8 +126,10 @@ func (p *MongoProvider) Indexes() []mongo.IndexModel {
 
 // EnsureIndexes creates the required indexes.
 func (p *MongoProvider) EnsureIndexes(ctx context.Context) error {
-	_, err := p.collection.Indexes().CreateMany(ctx, p.Indexes())
-	return err
+	if _, err := p.collection.Indexes().CreateMany(ctx, p.Indexes()); err != nil {
+		return fmt.Errorf("create indexes: %w", err)
+	}
+	return nil
 }
 
 // Get retrieves a schema by event name.

@@ -162,6 +162,12 @@ func (r *MongoRelay) WithMetrics(m *evtoutbox.Metrics) *MongoRelay {
 //
 // Both modes periodically recover stuck messages and cleanup old published messages.
 func (r *MongoRelay) Start(ctx context.Context) error {
+	// Best-effort index creation: the store remains functionally correct
+	// without its indexes, so a failure is logged rather than fatal.
+	if err := r.store.EnsureIndexes(ctx); err != nil {
+		r.log().Warn("failed to ensure outbox indexes", "error", err)
+	}
+
 	// Recover any stuck messages at startup
 	r.recoverStuck(ctx)
 

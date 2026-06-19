@@ -800,9 +800,36 @@ func (t *Transport) Start(ctx context.Context) error {
 	if !t.isOpen() {
 		return transport.ErrTransportClosed
 	}
+	t.ensureStoreIndexes(ctx)
 	t.startWatcher()
 	t.logger.Info("change stream watcher started")
 	return nil
+}
+
+// indexEnsurer is implemented by stores that can create their own indexes.
+// It is checked via type assertion so the public ResumeTokenStore and AckStore
+// interfaces stay minimal.
+type indexEnsurer interface {
+	EnsureIndexes(ctx context.Context) error
+}
+
+// ensureStoreIndexes creates indexes for the resume token and ack stores if
+// they support it. Index creation is best-effort: a failure is logged but does
+// not prevent the watcher from starting, since the stores remain functionally
+// correct without their (performance/TTL) indexes.
+func (t *Transport) ensureStoreIndexes(ctx context.Context) {
+	for name, store := range map[string]any{
+		"resume token": t.resumeTokenStore,
+		"ack":          t.ackStore,
+	} {
+		ensurer, ok := store.(indexEnsurer)
+		if !ok {
+			continue
+		}
+		if err := ensurer.EnsureIndexes(ctx); err != nil {
+			t.logger.Warn("failed to ensure store indexes", "store", name, "error", err)
+		}
+	}
 }
 
 // Close shuts down the transport.
@@ -1254,7 +1281,7 @@ func (t *Transport) watchLevelString() string {
 // changeStream abstracts the methods used from *mongo.ChangeStream,
 // enabling unit testing of the processing pipeline without a live MongoDB connection.
 type changeStream interface {
-	Decode(val interface{}) error
+	Decode(val any) error
 	Next(ctx context.Context) bool
 	TryNext(ctx context.Context) bool
 	ResumeToken() bson.Raw

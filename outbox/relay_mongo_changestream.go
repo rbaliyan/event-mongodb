@@ -185,6 +185,12 @@ func (r *ChangeStreamRelay) WithMetrics(m *evtoutbox.Metrics) *ChangeStreamRelay
 //  2. Processes any existing pending messages
 //  3. Starts watching for new inserts via Change Stream
 func (r *ChangeStreamRelay) Start(ctx context.Context) error {
+	// Best-effort index creation: the store remains functionally correct
+	// without its indexes, so a failure is logged rather than fatal.
+	if err := r.store.EnsureIndexes(ctx); err != nil {
+		r.log().Warn("failed to ensure outbox indexes", "error", err)
+	}
+
 	// Recover stuck messages at startup
 	r.recoverStuck(ctx)
 
