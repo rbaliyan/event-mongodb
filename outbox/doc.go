@@ -3,7 +3,7 @@
 //
 // MongoStore durably records outgoing events inside the same MongoDB transaction
 // as the business write, ensuring events are never lost even if the publisher
-// crashes before they are sent. A relay (MongoRelay for polling, or
+// crashes before they are sent. A relay (NewMongoRelay for polling, or
 // NewChangeStreamRelay for real-time) reads pending entries and publishes them
 // to the event transport.
 //
