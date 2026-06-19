@@ -94,9 +94,14 @@ func (m *MongoManager) Begin(ctx context.Context) (evttransaction.Transaction, e
 		return nil, fmt.Errorf("start transaction: %w", err)
 	}
 
+	// Bind the session into the context. In the v2 driver an operation only
+	// joins the transaction when its context carries the session, so callers
+	// must use MongoTransaction.Context() for all writes between Begin and
+	// Commit/Rollback. Without this the writes would auto-commit outside the
+	// transaction.
 	return &MongoTransaction{
 		session: session,
-		ctx:     ctx,
+		ctx:     mongo.NewSessionContext(ctx, session),
 	}, nil
 }
 
@@ -108,7 +113,7 @@ func (m *MongoManager) Execute(ctx context.Context, fn func(tx evttransaction.Tr
 	}
 	defer session.EndSession(ctx)
 
-	_, err = session.WithTransaction(ctx, func(ctx context.Context) (interface{}, error) {
+	_, err = session.WithTransaction(ctx, func(ctx context.Context) (any, error) {
 		tx := &MongoTransaction{
 			session: session,
 			ctx:     ctx,
@@ -130,7 +135,7 @@ func (m *MongoManager) ExecuteWithContext(ctx context.Context, fn func(ctx conte
 	}
 	defer session.EndSession(ctx)
 
-	_, err = session.WithTransaction(ctx, func(ctx context.Context) (interface{}, error) {
+	_, err = session.WithTransaction(ctx, func(ctx context.Context) (any, error) {
 		if err := fn(ctx); err != nil {
 			return nil, err
 		}
@@ -151,7 +156,7 @@ func WithTransaction(ctx context.Context, client *mongo.Client, fn MongoTxHandle
 	}
 	defer session.EndSession(ctx)
 
-	_, err = session.WithTransaction(ctx, func(ctx context.Context) (interface{}, error) {
+	_, err = session.WithTransaction(ctx, func(ctx context.Context) (any, error) {
 		if err := fn(ctx); err != nil {
 			return nil, err
 		}

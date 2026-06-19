@@ -15,6 +15,27 @@ go mod tidy            # Clean up dependencies
 
 MongoDB Change Stream transport (`github.com/rbaliyan/event-mongodb`) for the event pub-sub library. Watches MongoDB for changes and delivers them as events.
 
+The root package is the change stream transport. The module also ships MongoDB implementations of several `event/v3` abstractions as independent subpackages.
+
+## Subpackages
+
+| Package | Purpose | Canonical constructor |
+|---------|---------|-----------------------|
+| (root) | Change Stream transport | `mongodb.New(db, ...)` |
+| `persistent` | Durable `persistent.Store` + `CheckpointStore` for composite transport | `persistent.NewStore(collection, ...)` |
+| `checkpoint` | Standalone `CheckpointStore` (subscriber resume positions) | `checkpoint.NewMongoStore(collection, ...)` |
+| `store` | Generic typed CRUD store with cursor pagination | `store.NewMongoStore[T](collection, ...)` |
+| `outbox` | Transactional outbox store, publisher, and relays | `outbox.NewMongoStore(db, ...)` |
+| `transaction` | `transaction.Manager` for MongoDB sessions | `transaction.NewMongoManager(client)` |
+| `idempotency` | Shared, TTL-based message deduplication store | `idempotency.NewMongoStore(db, ...)` |
+| `distributed` | Atomic claim state manager for WorkerPool emulation | `distributed.NewMongoStateManager(db, ...)` |
+| `monitor` | Per-event lifecycle store for the monitor handler | `monitor.NewMongoStore(db)` |
+| `schema` | Schema registry provider with change watching | `schema.NewMongoProvider(db, publisher)` |
+| `codec` | BSON transport `Codec` (envelope) | `codec.BSON{}` |
+| `payload` | BSON payload `Codec` (document body) | `payload.BSON{}` |
+
+Note: index creation is no longer performed in store constructors (which do no I/O). The root transport calls `EnsureIndexes` on its resume-token and ack stores during `Start`; outbox relays call it during `Start`. Standalone store users should call `EnsureIndexes` once at startup.
+
 ## Architecture
 
 ### Core Components
@@ -71,13 +92,13 @@ import (
 )
 
 // MongoDB for durable storage
-store := mongopersistent.NewStore(collection,
+store, err := mongopersistent.NewStore(collection,
     mongopersistent.WithTTL(7*24*time.Hour),
     mongopersistent.WithVisibilityTimeout(10*time.Minute),
 )
 
 // Checkpoint store for consumer resume
-checkpointStore := mongopersistent.NewCheckpointStore(checkpointCollection)
+checkpointStore, err := mongopersistent.NewCheckpointStore(checkpointCollection)
 
 // Combine with Redis for low-latency signals
 transport, _ := composite.New(store, redis.New(redisClient),

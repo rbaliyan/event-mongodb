@@ -3,6 +3,7 @@ package checkpoint
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -72,8 +73,10 @@ func (s *MongoStore) EnsureIndexes(ctx context.Context) error {
 	if len(indexes) == 0 {
 		return nil
 	}
-	_, err := s.collection.Indexes().CreateMany(ctx, indexes)
-	return err
+	if _, err := s.collection.Indexes().CreateMany(ctx, indexes); err != nil {
+		return fmt.Errorf("create indexes: %w", err)
+	}
+	return nil
 }
 
 // Save persists the checkpoint position for a subscriber.
@@ -86,13 +89,15 @@ func (s *MongoStore) Save(ctx context.Context, subscriberID string, position tim
 	}
 
 	opts := options.Replace().SetUpsert(true)
-	_, err := s.collection.ReplaceOne(
+	if _, err := s.collection.ReplaceOne(
 		ctx,
 		bson.M{"_id": subscriberID},
 		doc,
 		opts,
-	)
-	return err
+	); err != nil {
+		return fmt.Errorf("save checkpoint: %w", err)
+	}
+	return nil
 }
 
 // Load retrieves the last saved checkpoint for a subscriber.
@@ -104,28 +109,32 @@ func (s *MongoStore) Load(ctx context.Context, subscriberID string) (time.Time, 
 		return time.Time{}, nil
 	}
 	if err != nil {
-		return time.Time{}, err
+		return time.Time{}, fmt.Errorf("load checkpoint: %w", err)
 	}
 	return doc.Position, nil
 }
 
 // Delete removes a checkpoint for a subscriber.
 func (s *MongoStore) Delete(ctx context.Context, subscriberID string) error {
-	_, err := s.collection.DeleteOne(ctx, bson.M{"_id": subscriberID})
-	return err
+	if _, err := s.collection.DeleteOne(ctx, bson.M{"_id": subscriberID}); err != nil {
+		return fmt.Errorf("delete checkpoint: %w", err)
+	}
+	return nil
 }
 
 // DeleteAll removes all checkpoints.
 func (s *MongoStore) DeleteAll(ctx context.Context) error {
-	_, err := s.collection.DeleteMany(ctx, bson.M{})
-	return err
+	if _, err := s.collection.DeleteMany(ctx, bson.M{}); err != nil {
+		return fmt.Errorf("delete all checkpoints: %w", err)
+	}
+	return nil
 }
 
 // List returns all subscriber IDs with checkpoints.
 func (s *MongoStore) List(ctx context.Context) ([]string, error) {
 	cursor, err := s.collection.Find(ctx, bson.M{}, options.Find().SetProjection(bson.M{"_id": 1}))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("list checkpoints: %w", err)
 	}
 	defer func() { _ = cursor.Close(ctx) }()
 
@@ -146,7 +155,7 @@ func (s *MongoStore) List(ctx context.Context) ([]string, error) {
 func (s *MongoStore) GetAll(ctx context.Context) (map[string]time.Time, error) {
 	cursor, err := s.collection.Find(ctx, bson.M{})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("get all checkpoints: %w", err)
 	}
 	defer func() { _ = cursor.Close(ctx) }()
 
@@ -169,7 +178,7 @@ func (s *MongoStore) GetCheckpointInfo(ctx context.Context, subscriberID string)
 		return nil, nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("get checkpoint info: %w", err)
 	}
 	return &evtcheckpoint.CheckpointInfo{
 		SubscriberID: doc.ID,

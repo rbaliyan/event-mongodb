@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -123,7 +123,9 @@ func WithCollection(name string) MongoStoreOption {
 // MongoStore defines the interface for MongoDB outbox storage
 type MongoStore struct {
 	collection *mongo.Collection
-	cappedInfo *cappedInfo // Cached capped info (nil = not checked yet)
+
+	cappedMu   sync.Mutex
+	cappedInfo *cappedInfo // Cached capped info (nil = not checked yet), guarded by cappedMu
 }
 
 // NewMongoStore creates a new MongoDB outbox store.
@@ -139,15 +141,12 @@ func NewMongoStore(db *mongo.Database, opts ...MongoStoreOption) (*MongoStore, e
 		opt(o)
 	}
 
-	s := &MongoStore{
+	// Index creation is not performed here: the constructor does no I/O. The
+	// MongoRelay and ChangeStreamRelay call EnsureIndexes during Start. When
+	// using the store without a relay, call EnsureIndexes once during startup.
+	return &MongoStore{
 		collection: db.Collection(o.collection),
-	}
-	go func() { // #nosec G118 — background goroutine intentionally outlives constructor context
-		if err := s.EnsureIndexes(context.Background()); err != nil {
-			slog.Default().Error("failed to ensure outbox indexes", "error", err, "collection", o.collection)
-		}
-	}()
-	return s, nil
+	}, nil
 }
 
 // Collection returns the underlying MongoDB collection
@@ -211,6 +210,9 @@ func (s *MongoStore) IsCapped(ctx context.Context) (bool, error) {
 // getCappedInfo returns detailed information about the collection's capped status.
 // The result is cached after the first call.
 func (s *MongoStore) getCappedInfo(ctx context.Context) (*cappedInfo, error) {
+	s.cappedMu.Lock()
+	defer s.cappedMu.Unlock()
+
 	if s.cappedInfo != nil {
 		return s.cappedInfo, nil
 	}
@@ -296,7 +298,9 @@ func (s *MongoStore) CreateCapped(ctx context.Context, sizeBytes int64, maxDocs 
 	}
 
 	// Refresh cached info
+	s.cappedMu.Lock()
 	s.cappedInfo = nil
+	s.cappedMu.Unlock()
 
 	return nil
 }
@@ -733,7 +737,7 @@ func (p *MongoPublisher) PublishWithTransaction(
 	}
 	defer sess.EndSession(ctx)
 
-	_, err = sess.WithTransaction(ctx, func(ctx context.Context) (interface{}, error) {
+	_, err = sess.WithTransaction(ctx, func(ctx context.Context) (any, error) {
 		// Execute user's business logic
 		if fn != nil {
 			if err := fn(ctx); err != nil {

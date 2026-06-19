@@ -28,6 +28,27 @@ go get github.com/rbaliyan/event-mongodb
 - Empty update filtering and updated fields size limits
 - OpenTelemetry metrics: handler middleware (oplog lag, handler duration, throughput, pending gauge) and transport-level metrics (active stream count, reconnections, receive lag)
 
+## Subpackages
+
+Beyond the root change stream transport, this module ships MongoDB
+implementations of several `event/v3` abstractions. Each subpackage is
+independently importable and documented via godoc.
+
+| Package | Import | Purpose | Canonical constructor |
+|---------|--------|---------|-----------------------|
+| (root) | `github.com/rbaliyan/event-mongodb` | Change Stream transport | `mongodb.New(db, ...)` |
+| persistent | `…/persistent` | Durable `persistent.Store` + `CheckpointStore` for the composite transport | `persistent.NewStore(collection, ...)` |
+| checkpoint | `…/checkpoint` | Standalone `CheckpointStore` (subscriber resume positions) | `checkpoint.NewMongoStore(collection, ...)` |
+| store | `…/store` | Generic typed CRUD store with cursor pagination | `store.NewMongoStore[T](collection, ...)` |
+| outbox | `…/outbox` | Transactional outbox store, publisher, and relays | `outbox.NewMongoStore(db, ...)` |
+| transaction | `…/transaction` | `transaction.Manager` for MongoDB sessions | `transaction.NewMongoManager(client)` |
+| idempotency | `…/idempotency` | Shared, TTL-based message deduplication store | `idempotency.NewMongoStore(db, ...)` |
+| distributed | `…/distributed` | Atomic claim state manager for WorkerPool emulation | `distributed.NewMongoStateManager(db, ...)` |
+| monitor | `…/monitor` | Per-event lifecycle store for the monitor handler | `monitor.NewMongoStore(db)` |
+| schema | `…/schema` | Schema registry provider with change watching | `schema.NewMongoProvider(db, publisher)` |
+| codec | `…/codec` | BSON transport `Codec` (envelope) | `codec.BSON{}` |
+| payload | `…/payload` | BSON payload `Codec` (document body) | `payload.BSON{}` |
+
 ## Usage
 
 ### Basic Usage
@@ -789,21 +810,32 @@ This setup provides:
 
 ## Examples
 
-See the [examples](examples/) directory for complete runnable examples:
+See the [examples](examples/) directory for complete runnable examples. Select
+one with the `EXAMPLE` environment variable:
 
 ```bash
-# Basic change stream watching
-EXAMPLE=basic go run ./examples
+EXAMPLE=all               go run ./examples  # Run every example in sequence
 
-# WorkerPool emulation with distributed state
-EXAMPLE=workerpool go run ./examples
+# Change stream transport
+EXAMPLE=basic             go run ./examples  # Change stream basics
+EXAMPLE=workerpool        go run ./examples  # WorkerPool emulation with distributed state
+EXAMPLE=idempotency       go run ./examples  # In-memory deduplication
+EXAMPLE=full              go run ./examples  # Full production setup
 
-# Deduplication with idempotency
-EXAMPLE=idempotency go run ./examples
-
-# Full production setup
-EXAMPLE=full go run ./examples
+# Subpackages
+EXAMPLE=transaction       go run ./examples  # MongoDB transaction manager
+EXAMPLE=checkpoint        go run ./examples  # MongoDB checkpoint store
+EXAMPLE=schema            go run ./examples  # MongoDB schema provider
+EXAMPLE=store             go run ./examples  # Generic MongoDB CRUD store
+EXAMPLE=idempotency-mongo go run ./examples  # MongoDB idempotency store
+EXAMPLE=monitor-mongo     go run ./examples  # MongoDB monitor store
+EXAMPLE=outbox            go run ./examples  # MongoDB outbox pattern
+EXAMPLE=codec             go run ./examples  # BSON transport codec (no MongoDB)
+EXAMPLE=payload           go run ./examples  # BSON payload codec (no MongoDB)
 ```
+
+> Most examples require a MongoDB replica set (for transactions and change
+> streams). The `codec` and `payload` examples run without MongoDB.
 
 ## Buffered Transport (Redis + MongoDB)
 
@@ -888,7 +920,7 @@ pending -> inflight -> acked
 ### Store Options
 
 ```go
-mongopersistent.NewStore(collection,
+store, err := mongopersistent.NewStore(collection,
     mongopersistent.WithTTL(7*24*time.Hour),           // Auto-delete acked messages
     mongopersistent.WithVisibilityTimeout(10*time.Minute), // Redelivery timeout
 )
