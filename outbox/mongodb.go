@@ -455,11 +455,13 @@ func (s *MongoStore) claimBatch(ctx context.Context, limit int) ([]*mongoMessage
 
 	// Step 3: fetch exactly the messages we claimed.
 	// Primary key lookup on ids (efficient) + claimed_by filter to drop any
-	// that a concurrent relay won the race on between steps 1 and 2.
+	// that a concurrent relay won the race on between steps 1 and 2. Re-apply
+	// the priority/age sort: $in does not preserve the step-1 ordering, and
+	// callers rely on highest-priority-then-oldest delivery order.
 	fetchCursor, err := s.collection.Find(ctx, bson.M{
 		"_id":        bson.M{"$in": ids},
 		"claimed_by": claimToken,
-	})
+	}, options.Find().SetSort(bson.D{{Key: "priority", Value: -1}, {Key: "created_at", Value: 1}}))
 	if err != nil {
 		return nil, fmt.Errorf("fetch claimed: %w", err)
 	}

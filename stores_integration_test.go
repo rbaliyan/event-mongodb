@@ -177,20 +177,24 @@ func TestIntegration_AckStore_PendingPartialIndex_ServesCount(t *testing.T) {
 	}
 
 	if findIndexScan(result) == "" {
-		t.Errorf("expected pending Count to be served by an IXSCAN, got plan: %v", result["queryPlanner"])
+		t.Errorf("expected pending Count to be served by an index-backed plan (IXSCAN or COUNT_SCAN), got plan: %v", result["queryPlanner"])
 	}
 }
 
 // findIndexScan walks an explain result and returns the indexName of the first
-// IXSCAN stage encountered, or "" if no IXSCAN appears in the plan. Walks both
+// index-backed stage encountered, or "" if the plan is not index-backed. A
+// covered pending count is served by a COUNT -> COUNT_SCAN plan over the
+// partial index rather than an IXSCAN, so any stage that carries an indexName
+// (IXSCAN, COUNT_SCAN, DISTINCT_SCAN, ...) counts as index-served. Walks both
 // queryPlanner.winningPlan and any nested rejectedPlans/inputStage trees.
 func findIndexScan(v any) string {
 	switch m := v.(type) {
 	case bson.M:
-		if stage, _ := m["stage"].(string); stage == "IXSCAN" {
-			if name, _ := m["indexName"].(string); name != "" {
-				return name
-			}
+		// Any stage carrying a non-empty indexName is index-backed. This covers
+		// IXSCAN as well as COUNT_SCAN (the covered-count plan over the partial
+		// index) without requiring a specific literal stage name.
+		if name, _ := m["indexName"].(string); name != "" {
+			return name
 		}
 		for _, child := range m {
 			if name := findIndexScan(child); name != "" {

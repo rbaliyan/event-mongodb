@@ -197,19 +197,38 @@ func TestIntegration_EnsureIndexes(t *testing.T) {
 
 	found := false
 	for _, idx := range indexes {
-		key, _ := idx["key"].(bson.M)
-		if key == nil {
-			// bson.M decodes nested documents as bson.M; also handle bson.D-ish.
+		if !indexKeyHasField(idx["key"], "expires_at") {
 			continue
 		}
-		if _, ok := key["expires_at"]; ok {
-			found = true
-			if _, ok := idx["expireAfterSeconds"]; !ok {
-				t.Errorf("expires_at index is not a TTL index: %v", idx)
-			}
+		found = true
+		// A TTL index is identified by the presence of an expireAfterSeconds
+		// field. expireAfterSeconds:0 is a valid TTL index (documents expire at
+		// the stored date), so presence — not a positive value — is what marks
+		// it as a TTL index.
+		if _, ok := idx["expireAfterSeconds"]; !ok {
+			t.Errorf("expires_at index is not a TTL index: %v", idx)
 		}
 	}
 	if !found {
 		t.Fatalf("TTL index on expires_at not found; indexes=%v", indexes)
 	}
+}
+
+// indexKeyHasField reports whether an index "key" document (as decoded from the
+// indexes listing) contains the named field. The driver may decode the nested
+// key document as either bson.M or bson.D depending on context, so both shapes
+// are handled.
+func indexKeyHasField(key any, field string) bool {
+	switch k := key.(type) {
+	case bson.M:
+		_, ok := k[field]
+		return ok
+	case bson.D:
+		for _, e := range k {
+			if e.Key == field {
+				return true
+			}
+		}
+	}
+	return false
 }

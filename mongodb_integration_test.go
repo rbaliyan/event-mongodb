@@ -179,6 +179,11 @@ func TestIntegration_ChangeStreamInsert(t *testing.T) {
 		t.Fatalf("Subscribe() error: %v", err)
 	}
 
+	// Start the watcher now that the subscriber is registered.
+	if err := transport.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
 	// Wait for the change stream to be live by inserting sentinel docs into the
 	// watched collection until an event arrives, then proceed with the real write.
 	coll := db.Collection("orders")
@@ -268,6 +273,10 @@ func TestIntegration_ChangeStreamUpdate(t *testing.T) {
 		t.Fatalf("Subscribe() error: %v", err)
 	}
 
+	if err := transport.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
 	waitForStreamReady(t, ctx, coll, received)
 
 	// Update the document
@@ -341,6 +350,10 @@ func TestIntegration_ChangeStreamDelete(t *testing.T) {
 		t.Fatalf("Subscribe() error: %v", err)
 	}
 
+	if err := transport.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
 	waitForStreamReady(t, ctx, coll, received)
 
 	// Delete the document
@@ -400,6 +413,10 @@ func TestIntegration_MultipleEvents(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("Subscribe() error: %v", err)
+	}
+
+	if err := transport.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
 	}
 
 	coll := db.Collection("orders")
@@ -518,6 +535,10 @@ func TestIntegration_DatabaseLevelWatch(t *testing.T) {
 		t.Fatalf("Subscribe() error: %v", err)
 	}
 
+	if err := transport.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
 	waitForStreamReadySlice(t, ctx, db.Collection("_sentinel"), &mu,
 		func() int { return len(events) },
 		func() { events = nil },
@@ -598,6 +619,10 @@ func TestIntegration_ResumeTokenPersistence(t *testing.T) {
 		t.Fatalf("Subscribe() error: %v", err)
 	}
 
+	if err := transport1.Start(ctx); err != nil {
+		t.Fatalf("Start(transport1): %v", err)
+	}
+
 	coll := db.Collection("orders")
 	waitForStreamReady(t, ctx, coll, received1)
 
@@ -670,6 +695,10 @@ func TestIntegration_ResumeTokenPersistence(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("Subscribe() error: %v", err)
+	}
+
+	if err := transport2.Start(ctx); err != nil {
+		t.Fatalf("Start(transport2): %v", err)
 	}
 
 	// Should receive the missed event from resume
@@ -788,6 +817,10 @@ func TestIntegration_ResumeFromStaleToken(t *testing.T) {
 		t.Fatalf("Subscribe() error: %v", err)
 	}
 
+	if err := transport.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
 	// The stream must recover and start delivering despite the bad initial token.
 	coll := db.Collection("orders")
 	waitForStreamReady(t, ctx, coll, received)
@@ -862,6 +895,9 @@ func TestIntegration_ReconnectAfterClose(t *testing.T) {
 			return nil
 		}); err != nil {
 			t.Fatalf("Subscribe() error: %v", err)
+		}
+		if err := tr.Start(ctx); err != nil {
+			t.Fatalf("Start() error: %v", err)
 		}
 		return bus, tr, ch
 	}
@@ -960,6 +996,10 @@ func TestIntegration_UpdateDescription_RemovedFields(t *testing.T) {
 		t.Fatalf("Subscribe: %v", err)
 	}
 
+	if err := transport.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
 	waitForStreamReady(t, ctx, coll, received)
 
 	if _, err := coll.UpdateByID(ctx, res.InsertedID, bson.M{"$unset": bson.M{"note": ""}}); err != nil {
@@ -1034,6 +1074,10 @@ func TestIntegration_UpdateDescription_TruncatedArrays(t *testing.T) {
 		return nil
 	}); err != nil {
 		t.Fatalf("Subscribe: %v", err)
+	}
+
+	if err := transport.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
 	}
 
 	waitForStreamReady(t, ctx, coll, received)
@@ -1120,6 +1164,10 @@ func TestIntegration_EmptyUpdate_DiscardedByDefault(t *testing.T) {
 			t.Fatalf("Subscribe: %v", err)
 		}
 
+		if err := transport.Start(ctx); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+
 		waitForStreamReady(t, ctx, coll, received)
 
 		// Set the field to its current value: produces no actual change, so the
@@ -1176,6 +1224,10 @@ func TestIntegration_EmptyUpdate_DiscardedByDefault(t *testing.T) {
 			return nil
 		}); err != nil {
 			t.Fatalf("Subscribe: %v", err)
+		}
+
+		if err := transport.Start(ctx); err != nil {
+			t.Fatalf("Start: %v", err)
 		}
 
 		waitForStreamReady(t, ctx, coll, received)
@@ -1262,6 +1314,10 @@ func TestIntegration_MaxUpdatedFieldsSize_Omitted(t *testing.T) {
 		t.Fatalf("Subscribe: %v", err)
 	}
 
+	if err := transport.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
 	// Readiness: drain any sentinel events on this channel shape.
 	if !eventuallyIntegration(15*time.Second, func() bool {
 		if _, err := coll.InsertOne(ctx, bson.M{"__sentinel": time.Now().UnixNano()}); err != nil {
@@ -1345,6 +1401,10 @@ func TestIntegration_FullDocumentOnly_Delivery(t *testing.T) {
 		return nil
 	}); err != nil {
 		t.Fatalf("Subscribe: %v", err)
+	}
+
+	if err := transport.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
 	}
 
 	// Readiness using the typed channel.
@@ -1440,6 +1500,10 @@ func TestIntegration_ClusterWatch(t *testing.T) {
 		return nil
 	}); err != nil {
 		t.Fatalf("Subscribe: %v", err)
+	}
+
+	if err := transport.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
 	}
 
 	// Probe readiness; if the cluster-level stream never produces our sentinel
@@ -1547,6 +1611,10 @@ func TestIntegration_MetricsReflectStreamActivity(t *testing.T) {
 		event.WithMiddleware(MetricsMiddleware[ChangeEvent](metrics)),
 	); err != nil {
 		t.Fatalf("Subscribe() error: %v", err)
+	}
+
+	if err := transport.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
 	}
 
 	coll := db.Collection("orders")
@@ -1659,6 +1727,10 @@ func TestIntegration_StartFromPast(t *testing.T) {
 	}
 	ch1 := subscribe(bus1, ev1)
 
+	if err := t1.Start(ctx); err != nil {
+		t.Fatalf("Start(phase1): %v", err)
+	}
+
 	gotHistorical := false
 	deadline := time.After(20 * time.Second)
 phase1:
@@ -1714,6 +1786,10 @@ phase1:
 		t.Fatalf("Register(phase2) error: %v", err)
 	}
 	ch2 := subscribe(bus2, ev2)
+
+	if err := t2.Start(ctx); err != nil {
+		t.Fatalf("Start(phase2): %v", err)
+	}
 
 	// Write a fresh sentinel that phase 2 must deliver. When we see it we know
 	// the resume stream is live and caught up; the historical document must not
@@ -1845,6 +1921,10 @@ func TestIntegration_MidStreamConnectivityLossRecovery(t *testing.T) {
 		return nil
 	}); err != nil {
 		t.Fatalf("Subscribe() error: %v", err)
+	}
+
+	if err := transport.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
 	}
 
 	// Confirm the stream is live through the proxy before disrupting it.
