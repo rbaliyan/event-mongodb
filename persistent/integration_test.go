@@ -336,14 +336,15 @@ func TestIntegration_Store_Purge(t *testing.T) {
 		t.Fatalf("Append pending: %v", err)
 	}
 
-	// Purge with a generous future age (negative cutoff) removes nothing yet,
-	// because acked_at is "now" which is not older than now+1h.
-	removed, err := store.Purge(ctx, -time.Hour)
+	// Purge(age) deletes acked messages older than now-age. With a large age the
+	// cutoff is far in the past, so a just-acked message is not old enough and
+	// nothing is removed.
+	removed, err := store.Purge(ctx, time.Hour)
 	if err != nil {
-		t.Fatalf("Purge (future cutoff): %v", err)
+		t.Fatalf("Purge (past cutoff): %v", err)
 	}
 	if removed != 0 {
-		t.Errorf("Purge with future cutoff removed %d, want 0", removed)
+		t.Errorf("Purge with past cutoff removed %d, want 0", removed)
 	}
 
 	// Allow a small margin so the acked_at timestamp is comfortably in the past.

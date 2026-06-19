@@ -300,14 +300,11 @@ func TestIntegrationRelayPollPublishesPending(t *testing.T) {
 	runCtx, cancel := context.WithCancel(ctx)
 	done := make(chan error, 1)
 	go func() { done <- relay.Start(runCtx) }()
-	t.Cleanup(func() {
-		cancel()
-		select {
-		case <-done:
-		case <-time.After(5 * time.Second):
-			t.Error("relay Start did not return after cancel")
-		}
-	})
+	// Defensive: ensure the relay goroutine is cancelled even if the body fails
+	// before it reaches its own cancel/wait below. The buffered done channel is
+	// drained by the inline wait at the end (do not also read it here, or the
+	// two readers race for the single sent value).
+	t.Cleanup(cancel)
 
 	if !waitFor(t, 5*time.Second, func() bool { return rt.count() >= 2 }) {
 		t.Fatalf("transport published %d messages, want >= 2", rt.count())
@@ -363,10 +360,7 @@ func TestIntegrationRelayPollMarksFailedOnTransportError(t *testing.T) {
 	runCtx, cancel := context.WithCancel(ctx)
 	done := make(chan error, 1)
 	go func() { done <- relay.Start(runCtx) }()
-	t.Cleanup(func() {
-		cancel()
-		<-done
-	})
+	t.Cleanup(cancel) // inline wait below drains done; don't double-read it here
 
 	// A failed publish moves the message to failed status.
 	if !waitFor(t, 5*time.Second, func() bool {
@@ -534,14 +528,7 @@ func TestIntegrationChangeStreamWatchDelivers(t *testing.T) {
 	runCtx, cancel := context.WithCancel(ctx)
 	done := make(chan error, 1)
 	go func() { done <- csRelay.Start(runCtx) }()
-	t.Cleanup(func() {
-		cancel()
-		select {
-		case <-done:
-		case <-time.After(5 * time.Second):
-			t.Error("ChangeStreamRelay Start did not return after cancel")
-		}
-	})
+	t.Cleanup(cancel) // inline wait below drains done; don't double-read it here
 
 	// Give the watch loop a brief, bounded moment to establish before inserting.
 	time.Sleep(500 * time.Millisecond)
