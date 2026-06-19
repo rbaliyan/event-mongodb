@@ -48,9 +48,14 @@ func WithInstanceID(id string) Option {
 }
 
 // WithCapped enables MongoDB capped collection mode.
-// sizeBytes is the max collection size; maxDocs is max number of docs (0 = unlimited).
+// sizeBytes is the max collection size (must be positive; a capped collection
+// requires a size, so a non-positive value is ignored and capped mode is not
+// enabled). maxDocs is the max number of docs (0 = unlimited).
 func WithCapped(sizeBytes int64, maxDocs int64) Option {
 	return func(o *stateOptions) {
+		if sizeBytes <= 0 {
+			return
+		}
 		o.capped = true
 		o.cappedSize = sizeBytes
 		o.cappedMaxDocs = maxDocs

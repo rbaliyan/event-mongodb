@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
@@ -88,7 +89,7 @@ func (s *MongoStore[T]) Create(ctx context.Context, item T) error {
 		if mongo.IsDuplicateKeyError(err) {
 			return evtstore.ErrAlreadyExists
 		}
-		return err
+		return fmt.Errorf("insert: %w", err)
 	}
 	return nil
 }
@@ -106,7 +107,7 @@ func (s *MongoStore[T]) Get(ctx context.Context, id string) (T, error) {
 		if errors.Is(err, mongo.ErrNoDocuments) {
 			return zero, evtstore.ErrNotFound
 		}
-		return zero, err
+		return zero, fmt.Errorf("find: %w", err)
 	}
 	return item, nil
 }
@@ -120,7 +121,7 @@ func (s *MongoStore[T]) Update(ctx context.Context, item T) error {
 
 	result, err := s.collection.ReplaceOne(ctx, bson.M{s.idField: id}, item)
 	if err != nil {
-		return err
+		return fmt.Errorf("replace: %w", err)
 	}
 	if result.MatchedCount == 0 {
 		return evtstore.ErrNotFound
@@ -130,8 +131,10 @@ func (s *MongoStore[T]) Update(ctx context.Context, item T) error {
 
 // Delete removes a document by ID.
 func (s *MongoStore[T]) Delete(ctx context.Context, id string) error {
-	_, err := s.collection.DeleteOne(ctx, bson.M{s.idField: id})
-	return err
+	if _, err := s.collection.DeleteOne(ctx, bson.M{s.idField: id}); err != nil {
+		return fmt.Errorf("delete: %w", err)
+	}
+	return nil
 }
 
 // List retrieves documents matching the filter with pagination.
@@ -160,13 +163,13 @@ func (s *MongoStore[T]) List(ctx context.Context, filter evtstore.Filter) (*evts
 
 	cur, err := s.collection.Find(ctx, query, opts)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("find: %w", err)
 	}
 	defer func() { _ = cur.Close(ctx) }()
 
 	var items []T
 	if err := cur.All(ctx, &items); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("decode: %w", err)
 	}
 
 	page := &evtstore.Page[T]{}
@@ -194,7 +197,7 @@ func (s *MongoStore[T]) DeleteOlderThan(ctx context.Context, age time.Duration) 
 		s.createdAtField: bson.M{"$lt": cutoff},
 	})
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("delete many: %w", err)
 	}
 	return result.DeletedCount, nil
 }
@@ -240,8 +243,10 @@ func (s *MongoStore[T]) EnsureIndexes(ctx context.Context) error {
 		{Keys: bson.D{{Key: s.createdAtField, Value: 1}, {Key: s.idField, Value: 1}}},
 	}
 
-	_, err := s.collection.Indexes().CreateMany(ctx, indexes)
-	return err
+	if _, err := s.collection.Indexes().CreateMany(ctx, indexes); err != nil {
+		return fmt.Errorf("create indexes: %w", err)
+	}
+	return nil
 }
 
 // Upsert creates or updates a document.
@@ -251,13 +256,15 @@ func (s *MongoStore[T]) Upsert(ctx context.Context, item T) error {
 		return evtstore.ErrInvalidID
 	}
 
-	_, err := s.collection.ReplaceOne(
+	if _, err := s.collection.ReplaceOne(
 		ctx,
 		bson.M{s.idField: id},
 		item,
 		options.Replace().SetUpsert(true),
-	)
-	return err
+	); err != nil {
+		return fmt.Errorf("upsert: %w", err)
+	}
+	return nil
 }
 
 // Compile-time interface checks.
