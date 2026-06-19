@@ -17,6 +17,31 @@ test: test-unit test-integration
 test-unit:
     go test -v -short ./...
 
+# Fast hermetic smoke check (no MongoDB): build + short tests + examples
+smoke:
+    go build ./...
+    go test -short -count=1 ./...
+    go test -short -run Example ./...
+
+# Run all benchmarks (no MongoDB required for the pure-logic hot paths)
+bench:
+    go test -run='^$' -bench=. -benchmem ./...
+
+# Compare benchmarks against a base ref using benchstat (default: main)
+bench-compare base="main":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    command -v benchstat >/dev/null || go install golang.org/x/perf/cmd/benchstat@latest
+    go test -run='^$' -bench=. -benchmem -count=6 ./... > /tmp/new.txt
+    git worktree add -f /tmp/bench-base {{base}}
+    ( cd /tmp/bench-base && go test -run='^$' -bench=. -benchmem -count=6 ./... > /tmp/old.txt ) || true
+    git worktree remove --force /tmp/bench-base
+    benchstat /tmp/old.txt /tmp/new.txt
+
+# Run a fuzz target for a duration (e.g. just fuzz FuzzBSONCodecDecode ./codec 30s)
+fuzz target="FuzzConvertBSOND" pkg="." duration="30s":
+    go test -run='^$' -fuzz='^{{target}}$' -fuzztime={{duration}} {{pkg}}
+
 # Run integration tests (requires MongoDB)
 test-integration: mongo-start
     #!/usr/bin/env bash

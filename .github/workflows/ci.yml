@@ -9,8 +9,8 @@ on:
 permissions: read-all
 
 jobs:
-  test:
-    name: Test
+  smoke:
+    name: Smoke (fast, no MongoDB)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -27,8 +27,114 @@ jobs:
       - name: Build examples
         run: go build -o /dev/null ./examples/
 
-      - name: Test
-        run: go test -v -race ./...
+      - name: Smoke tests (short, hermetic)
+        run: go test -short -count=1 ./...
+
+      - name: Runnable examples
+        run: go test -short -run Example ./...
+
+  test:
+    name: Unit Tests (race)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: go.mod
+
+      - name: Unit tests
+        run: go test -short -race -count=1 ./...
+
+  integration:
+    name: Integration Tests (MongoDB)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: go.mod
+
+      - name: Start MongoDB replica set
+        run: |
+          docker run -d --name mongo -p 27018:27017 mongo:6.0 --replSet rs0
+          # Wait for mongod to accept connections, then initiate the replica set.
+          for i in $(seq 1 30); do
+            if docker exec mongo mongosh --quiet --eval "db.adminCommand('ping').ok" | grep -q 1; then
+              break
+            fi
+            sleep 1
+          done
+          docker exec mongo mongosh --quiet --eval "rs.initiate()"
+          # Wait until the node is primary (writable) before running tests.
+          for i in $(seq 1 30); do
+            if docker exec mongo mongosh --quiet --eval "db.hello().isWritablePrimary" | grep -q true; then
+              break
+            fi
+            sleep 1
+          done
+
+      - name: Integration + unit tests with coverage
+        env:
+          MONGO_URI: mongodb://localhost:27018/?directConnection=true
+        run: go test -race -count=1 -coverprofile=coverage.out -covermode=atomic ./...
+
+      - name: Coverage summary
+        run: |
+          go tool cover -func=coverage.out | tail -1 | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Enforce coverage floor
+        run: |
+          # Starting floor; ratchet upward as coverage improves.
+          THRESHOLD=70.0
+          TOTAL=$(go tool cover -func=coverage.out | awk '/^total:/ {gsub(/%/,"",$3); print $3}')
+          echo "Total coverage: ${TOTAL}% (floor: ${THRESHOLD}%)"
+          awk -v t="$THRESHOLD" -v c="$TOTAL" 'BEGIN { exit (c+0 >= t+0) ? 0 : 1 }' \
+            || { echo "Coverage ${TOTAL}% is below floor ${THRESHOLD}%"; exit 1; }
+
+  bench:
+    name: Benchmarks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: go.mod
+
+      - name: Install benchstat
+        run: go install golang.org/x/perf/cmd/benchstat@latest
+
+      - name: Run benchmarks (HEAD)
+        run: go test -run='^$' -bench=. -benchmem -count=6 ./... | tee new.txt
+
+      - name: Run benchmarks (base) and compare
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git worktree add /tmp/base "$BASE_SHA"
+          ( cd /tmp/base && go test -run='^$' -bench=. -benchmem -count=6 ./... > "$GITHUB_WORKSPACE/old.txt" 2>/dev/null ) || true
+          {
+            echo '## Benchmark comparison (base vs HEAD)'
+            echo '```'
+            if [ -s old.txt ]; then
+              benchstat old.txt new.txt || true
+            else
+              echo 'No comparable base benchmarks; showing HEAD results:'
+              benchstat new.txt || true
+            fi
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
   lint:
     name: Lint

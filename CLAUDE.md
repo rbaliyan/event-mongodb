@@ -304,12 +304,29 @@ atomic.LoadInt32(&t.status) == 1             // IsOpen
 
 ## Testing
 
-Metrics tests use `sdkmetric.NewManualReader()` for deterministic reads — no external services needed.
-Integration tests (transport, stores) require a MongoDB replica set. Run with:
+The suite has five layers; CI runs each in a dedicated job (`.github/workflows/ci.yml`).
 
-```bash
-go test -v ./...
-```
+| Layer | How to run | MongoDB needed? |
+|-------|------------|-----------------|
+| Smoke | `just smoke` (build + `go test -short` + examples) | No |
+| Unit | `go test -short -race ./...` | No |
+| Integration | `just test-integration` (spins up a replica set) | Yes (replica set) |
+| Benchmarks | `just bench` / `just bench-compare main` | No (pure hot paths) |
+| Fuzz | `just fuzz <Target> <pkg> <dur>`; ClusterFuzzLite in CI | No |
+
+- Unit/smoke tests are hermetic: integration tests gate on `testing.Short()` and on a MongoDB ping (`getMongoURI` → connect → `t.Skipf` when unavailable), so `go test -short ./...` needs no services.
+- Metrics tests use `sdkmetric.NewManualReader()` for deterministic reads.
+- Integration tests require a MongoDB replica set (change streams + transactions). The CI `integration` job starts `mongo:6.0 --replSet rs0`, sets `MONGO_URI`, runs the full suite with `-race`, and enforces a coverage floor.
+
+### Benchmarks
+
+Benchmarks live in `*_bench_test.go` / `bench_test.go` files and cover the per-event hot paths (BSON→JSON conversion, change-event extraction, payload/metadata building, codec round-trips, the `Field[T]` accessor, and store query builders). All use `b.ReportAllocs()` and `b.Run` sub-benchmarks. The CI `bench` job runs them and posts a `benchstat` base-vs-HEAD comparison to the job summary.
+
+### Fuzzing
+
+Native Go fuzz targets live in `fuzz_test.go` files; targets are registered for ClusterFuzzLite in `.clusterfuzzlite/build.sh`. Targets cover the untrusted-input boundary — BSON decode (`codec`/`payload`), change-stream document conversion, the `Field[T]` numeric coercion, and the monitor cursor decoder — and use real oracles (decode→encode→decode round-trip fixpoints, cross-type coercion agreement) rather than don't-panic only. Seed corpora are committed under `testdata/fuzz/`. CI runs ClusterFuzzLite in `code-change` mode per PR (`cflite_pr.yml`) and a weekly hour-long ASan batch (`cflite_batch.yml`).
+
+**Rule:** new code that parses or decodes untrusted input must ship a corresponding fuzz target registered in `build.sh`.
 
 ## Limitations
 

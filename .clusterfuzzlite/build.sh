@@ -1,5 +1,16 @@
 #!/bin/bash -eu
+
+# Root package (github.com/rbaliyan/event-mongodb)
 compile_native_go_fuzzer github.com/rbaliyan/event-mongodb FuzzFormatDocumentKey fuzz_format_document_key
 compile_native_go_fuzzer github.com/rbaliyan/event-mongodb FuzzBsonDToJSON fuzz_bson_d_to_json
 compile_native_go_fuzzer github.com/rbaliyan/event-mongodb FuzzConvertBSONTypes fuzz_convert_bson_types
 compile_native_go_fuzzer github.com/rbaliyan/event-mongodb FuzzChangeEventJSON fuzz_change_event_json
+compile_native_go_fuzzer github.com/rbaliyan/event-mongodb FuzzConvertBSOND fuzz_convert_bson_d
+compile_native_go_fuzzer github.com/rbaliyan/event-mongodb FuzzFieldCoerce fuzz_field_coerce
+
+# Subpackages
+compile_native_go_fuzzer github.com/rbaliyan/event-mongodb/monitor FuzzDecodeMongoCursor fuzz_decode_mongo_cursor
+compile_native_go_fuzzer github.com/rbaliyan/event-mongodb/codec FuzzBSONCodecDecode fuzz_bson_codec_decode
+compile_native_go_fuzzer github.com/rbaliyan/event-mongodb/codec FuzzBSONCodecRoundTrip fuzz_bson_codec_round_trip
+compile_native_go_fuzzer github.com/rbaliyan/event-mongodb/payload FuzzPayloadBSONDecode fuzz_payload_bson_decode
+compile_native_go_fuzzer github.com/rbaliyan/event-mongodb/payload FuzzPayloadBSONRoundTrip fuzz_payload_bson_round_trip

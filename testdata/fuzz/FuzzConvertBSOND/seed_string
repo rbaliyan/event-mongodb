@@ -1,0 +1,5 @@
+go test fuzz v1
+string("key")
+string("value")
+int64(0)
+byte('\x00')

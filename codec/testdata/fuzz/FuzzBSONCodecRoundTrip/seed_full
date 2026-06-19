@@ -1,0 +1,7 @@
+go test fuzz v1
+string("evt-rt-1")
+string("shop.orders")
+string("insert")
+string("orders")
+int64(1781913600500)
+int(2)

@@ -1,0 +1,5 @@
+go test fuzz v1
+string("ts")
+string("t")
+int64(123456789)
+byte('\x06')

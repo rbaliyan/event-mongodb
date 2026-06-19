@@ -1,0 +1,5 @@
+go test fuzz v1
+string("alice")
+int64(7)
+bool(true)
+float64(3.14)
