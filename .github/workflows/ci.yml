@@ -95,9 +95,9 @@ jobs:
 
       - name: Enforce coverage floor
         run: |
-          # Conservative starting floor; ratchet upward as coverage improves
-          # (the Coverage summary step prints the actual total).
-          THRESHOLD=55.0
+          # Floor with headroom below the current ~76% library coverage; ratchet
+          # upward as coverage improves (the Coverage summary prints the total).
+          THRESHOLD=70.0
           TOTAL=$(go tool cover -func=coverage.out | awk '/^total:/ {gsub(/%/,"",$3); print $3}')
           echo "Total coverage: ${TOTAL}% (floor: ${THRESHOLD}%)"
           awk -v t="$THRESHOLD" -v c="$TOTAL" 'BEGIN { exit (c+0 >= t+0) ? 0 : 1 }' \
