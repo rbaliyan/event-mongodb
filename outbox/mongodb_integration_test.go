@@ -159,23 +159,29 @@ func TestIntegrationConcurrentClaimNoDuplicates(t *testing.T) {
 
 	var mu sync.Mutex
 	seen := make(map[string]int)
+	var claimErrs []error
 	var wg sync.WaitGroup
 	for w := 0; w < 5; w++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			msgs, err := store.claimBatch(ctx, total)
+			mu.Lock()
+			defer mu.Unlock()
 			if err != nil {
+				claimErrs = append(claimErrs, err)
 				return
 			}
-			mu.Lock()
 			for _, m := range msgs {
 				seen[m.EventID]++
 			}
-			mu.Unlock()
 		}()
 	}
 	wg.Wait()
+
+	for _, err := range claimErrs {
+		t.Errorf("concurrent claimBatch error: %v", err)
+	}
 
 	for id, n := range seen {
 		if n != 1 {

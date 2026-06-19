@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -86,6 +87,55 @@ func TestIntegrationAcquireAndReacquire(t *testing.T) {
 	}
 	if ok {
 		t.Fatal("expected acquire to fail while lease is held")
+	}
+}
+
+// TestIntegration_ConcurrentAcquire races N goroutines to Acquire the SAME
+// message ID. The Acquire upsert is keyed on a unique _id, so exactly one
+// goroutine must win the lease (return true); the rest must observe it as
+// already held (return false) via the duplicate-key / held-lease paths. Any
+// unexpected error fails the test.
+func TestIntegration_ConcurrentAcquire(t *testing.T) {
+	mgr, cleanup := setupDistributedIntegrationTest(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	const (
+		id         = "concurrent-acquire"
+		goroutines = 20
+		leaseTTL   = time.Minute
+	)
+
+	var wg sync.WaitGroup
+	results := make([]bool, goroutines)
+	errs := make([]error, goroutines)
+	start := make(chan struct{})
+
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			<-start // release all goroutines at once to maximize contention
+			ok, err := mgr.Acquire(ctx, id, leaseTTL)
+			results[idx] = ok
+			errs[idx] = err
+		}(i)
+	}
+
+	close(start)
+	wg.Wait()
+
+	successes := 0
+	for i := 0; i < goroutines; i++ {
+		if errs[i] != nil {
+			t.Errorf("goroutine %d: unexpected Acquire error: %v", i, errs[i])
+		}
+		if results[i] {
+			successes++
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("expected exactly 1 successful Acquire, got %d", successes)
 	}
 }
 

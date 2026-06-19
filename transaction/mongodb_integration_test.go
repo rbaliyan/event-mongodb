@@ -89,12 +89,12 @@ func countByID(t *testing.T, coll *mongo.Collection, id string) int64 {
 	return n
 }
 
-// TestMongoTransaction_RollbackOmitsDocument is the key test requested by the
-// design review: a document inserted via tx.Context() must NOT survive a
+// TestIntegration_Transaction_RollbackOmitsDocument is the key test requested
+// by the design review: a document inserted via tx.Context() must NOT survive a
 // Rollback. This proves the session is correctly bound into the context by
 // Begin (mongo.NewSessionContext), so the write joins the transaction instead
 // of auto-committing.
-func TestMongoTransaction_RollbackOmitsDocument(t *testing.T) {
+func TestIntegration_Transaction_RollbackOmitsDocument(t *testing.T) {
 	client, coll, cleanup := setupTxIntegrationTest(t)
 	defer cleanup()
 
@@ -140,9 +140,9 @@ func TestMongoTransaction_RollbackOmitsDocument(t *testing.T) {
 	}
 }
 
-// TestMongoTransaction_CommitPersistsDocument is the commit counterpart: a
-// document inserted via tx.Context() must survive a Commit.
-func TestMongoTransaction_CommitPersistsDocument(t *testing.T) {
+// TestIntegration_Transaction_CommitPersistsDocument is the commit counterpart:
+// a document inserted via tx.Context() must survive a Commit.
+func TestIntegration_Transaction_CommitPersistsDocument(t *testing.T) {
 	client, coll, cleanup := setupTxIntegrationTest(t)
 	defer cleanup()
 
@@ -183,8 +183,8 @@ func TestMongoTransaction_CommitPersistsDocument(t *testing.T) {
 	}
 }
 
-// TestMongoManager_Execute_Commit verifies a successful fn commits its writes.
-func TestMongoManager_Execute_Commit(t *testing.T) {
+// TestIntegration_Manager_Execute_Commit verifies a successful fn commits its writes.
+func TestIntegration_Manager_Execute_Commit(t *testing.T) {
 	client, coll, cleanup := setupTxIntegrationTest(t)
 	defer cleanup()
 
@@ -211,9 +211,9 @@ func TestMongoManager_Execute_Commit(t *testing.T) {
 	}
 }
 
-// TestMongoManager_Execute_Rollback verifies an fn returning an error rolls
-// back its writes.
-func TestMongoManager_Execute_Rollback(t *testing.T) {
+// TestIntegration_Manager_Execute_Rollback verifies an fn returning an error
+// rolls back its writes.
+func TestIntegration_Manager_Execute_Rollback(t *testing.T) {
 	client, coll, cleanup := setupTxIntegrationTest(t)
 	defer cleanup()
 
@@ -246,9 +246,9 @@ func TestMongoManager_Execute_Rollback(t *testing.T) {
 	}
 }
 
-// TestWithTransaction_Commit verifies the WithTransaction helper commits on
-// success.
-func TestWithTransaction_Commit(t *testing.T) {
+// TestIntegration_WithTransaction_Commit verifies the WithTransaction helper
+// commits on success.
+func TestIntegration_WithTransaction_Commit(t *testing.T) {
 	client, coll, cleanup := setupTxIntegrationTest(t)
 	defer cleanup()
 
@@ -269,9 +269,9 @@ func TestWithTransaction_Commit(t *testing.T) {
 	}
 }
 
-// TestWithTransaction_Rollback verifies the WithTransaction helper rolls back
-// when fn returns an error.
-func TestWithTransaction_Rollback(t *testing.T) {
+// TestIntegration_WithTransaction_Rollback verifies the WithTransaction helper
+// rolls back when fn returns an error.
+func TestIntegration_WithTransaction_Rollback(t *testing.T) {
 	client, coll, cleanup := setupTxIntegrationTest(t)
 	defer cleanup()
 

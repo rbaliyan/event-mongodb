@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -65,10 +66,10 @@ func setupIdempotencyIntegrationTest(t *testing.T) (*MongoStore, func()) {
 	return store, cleanup
 }
 
-// TestMongoStore_IsDuplicate_FirstThenSecond verifies the core semantics of
+// TestIntegration_IsDuplicate_FirstThenSecond verifies the core semantics of
 // isDuplicateWithCollection: the first IsDuplicate for a fresh id returns
 // false (and atomically marks it via the upsert), and the second returns true.
-func TestMongoStore_IsDuplicate_FirstThenSecond(t *testing.T) {
+func TestIntegration_IsDuplicate_FirstThenSecond(t *testing.T) {
 	store, cleanup := setupIdempotencyIntegrationTest(t)
 	defer cleanup()
 
@@ -92,9 +93,58 @@ func TestMongoStore_IsDuplicate_FirstThenSecond(t *testing.T) {
 	}
 }
 
-// TestMongoStore_MarkProcessedThenIsDuplicate verifies that an explicitly
+// TestIntegration_ConcurrentIsDuplicate races N goroutines calling IsDuplicate
+// for the same fresh id. Per isDuplicateWithCollection's semantics, the upsert
+// filter never matches a non-existent document, so all callers contend on an
+// upsert insert keyed by the unique _id: exactly one wins (returns false,
+// "first-seen") and the rest hit a duplicate-key error mapped to true
+// ("already seen"). Any other error fails the test.
+func TestIntegration_ConcurrentIsDuplicate(t *testing.T) {
+	store, cleanup := setupIdempotencyIntegrationTest(t)
+	defer cleanup()
+
+	ctx := context.Background()
+	const (
+		id         = "concurrent-dup"
+		goroutines = 20
+	)
+
+	var wg sync.WaitGroup
+	dups := make([]bool, goroutines)
+	errs := make([]error, goroutines)
+	start := make(chan struct{})
+
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			<-start // release simultaneously to maximize contention
+			dup, err := store.IsDuplicate(ctx, id)
+			dups[idx] = dup
+			errs[idx] = err
+		}(i)
+	}
+
+	close(start)
+	wg.Wait()
+
+	firstSeen := 0
+	for i := 0; i < goroutines; i++ {
+		if errs[i] != nil {
+			t.Errorf("goroutine %d: unexpected IsDuplicate error: %v", i, errs[i])
+		}
+		if !dups[i] { // dup==false means this caller observed the first-seen result
+			firstSeen++
+		}
+	}
+	if firstSeen != 1 {
+		t.Fatalf("expected exactly 1 first-seen (dup==false) observation, got %d", firstSeen)
+	}
+}
+
+// TestIntegration_MarkProcessedThenIsDuplicate verifies that an explicitly
 // marked id is reported as a duplicate on the next IsDuplicate check.
-func TestMongoStore_MarkProcessedThenIsDuplicate(t *testing.T) {
+func TestIntegration_MarkProcessedThenIsDuplicate(t *testing.T) {
 	store, cleanup := setupIdempotencyIntegrationTest(t)
 	defer cleanup()
 
@@ -126,9 +176,9 @@ func TestMongoStore_MarkProcessedThenIsDuplicate(t *testing.T) {
 	}
 }
 
-// TestMongoStore_MarkProcessedWithTTL_Expired verifies that once an entry's
+// TestIntegration_MarkProcessedWithTTL_Expired verifies that once an entry's
 // TTL has elapsed, IsDuplicate treats the id as not-yet-processed again.
-func TestMongoStore_MarkProcessedWithTTL_Expired(t *testing.T) {
+func TestIntegration_MarkProcessedWithTTL_Expired(t *testing.T) {
 	store, cleanup := setupIdempotencyIntegrationTest(t)
 	defer cleanup()
 
@@ -160,8 +210,8 @@ func TestMongoStore_MarkProcessedWithTTL_Expired(t *testing.T) {
 	}
 }
 
-// TestMongoStore_EnsureIndexes verifies the TTL index on expires_at is created.
-func TestMongoStore_EnsureIndexes(t *testing.T) {
+// TestIntegration_EnsureIndexes verifies the TTL index on expires_at is created.
+func TestIntegration_EnsureIndexes(t *testing.T) {
 	store, cleanup := setupIdempotencyIntegrationTest(t)
 	defer cleanup()
 
