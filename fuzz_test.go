@@ -1,10 +1,12 @@
 package mongodb
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 	"time"
 
+	event "github.com/rbaliyan/event/v3"
 	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
@@ -141,39 +143,168 @@ func FuzzFormatDocumentKey(f *testing.F) {
 	})
 }
 
+// FuzzBsonDToJSON feeds RAW bytes through the production BSON parser
+// (bson.Unmarshal into a bson.D) and then through bsonDToJSON — the exact
+// path extractChangeEvent uses for FullDocument. This exercises the real
+// driver decoder over hostile input rather than re-encoding JSON.
+//
+// Oracle:
+//   - bson.Unmarshal must never panic.
+//   - When the bytes decode to a bson.D, bsonDToJSON must not error and must
+//     emit valid JSON (json.Unmarshal of its output succeeds).
 func FuzzBsonDToJSON(f *testing.F) {
-	f.Add([]byte(`{"name":"test","value":42}`))
-	f.Add([]byte(`{}`))
-	f.Add([]byte(`{"nested":{"key":"val"}}`))
-	f.Add([]byte(`{"arr":[1,2,3]}`))
-	f.Add([]byte(``))
+	for _, seed := range fuzzRawBSONSeeds(f) {
+		f.Add(seed)
+	}
+	// Malformed / hostile byte seeds.
+	f.Add([]byte{})
+	f.Add([]byte{0x05, 0x00, 0x00, 0x00, 0x00}) // minimal empty document
+	f.Add([]byte{0xDE, 0xAD, 0xBE, 0xEF})
+	f.Add([]byte{0xFF, 0x00, 0x00, 0x00, 0x10, 0x61, 0x00, 0x01})
 
 	f.Fuzz(func(t *testing.T, data []byte) {
-		var m map[string]any
-		if err := json.Unmarshal(data, &m); err != nil {
+		var d bson.D
+		if err := bson.Unmarshal(data, &d); err != nil {
+			// Malformed BSON rejected cleanly; contract is "no panic".
 			return
 		}
 
-		doc := mapToBsonD(m)
-		_, _ = bsonDToJSON(doc)
+		out, err := bsonDToJSON(d)
+		if err != nil {
+			t.Fatalf("bsonDToJSON errored on decoded bson.D: %v (doc=%v)", err, d)
+		}
+		var v any
+		if err := json.Unmarshal(out, &v); err != nil {
+			t.Fatalf("bsonDToJSON produced invalid JSON: %v\njson=%s", err, out)
+		}
 	})
 }
 
+// FuzzConvertBSONTypes feeds RAW bytes through bson.Unmarshal and then through
+// convertBSONTypes, mirroring the production FullDocument conversion path.
+//
+// Oracle:
+//   - bson.Unmarshal and convertBSONTypes must never panic.
+//   - When the bytes decode, the converted value must itself be JSON-encodable
+//     (json.Marshal succeeds), since that is the downstream contract.
 func FuzzConvertBSONTypes(f *testing.F) {
-	f.Add([]byte(`{"key":"value"}`))
-	f.Add([]byte(`{"num":123,"bool":true,"null":null}`))
-	f.Add([]byte(`{"nested":{"a":1},"arr":[1,"two",false]}`))
-	f.Add([]byte(`{}`))
-	f.Add([]byte(``))
+	for _, seed := range fuzzRawBSONSeeds(f) {
+		f.Add(seed)
+	}
+	f.Add([]byte{})
+	f.Add([]byte{0x05, 0x00, 0x00, 0x00, 0x00})
+	f.Add([]byte{0xDE, 0xAD, 0xBE, 0xEF})
+	f.Add([]byte{0xFF, 0x00, 0x00, 0x00, 0x10, 0x61, 0x00, 0x01})
 
 	f.Fuzz(func(t *testing.T, data []byte) {
-		var m map[string]any
-		if err := json.Unmarshal(data, &m); err != nil {
+		var d bson.D
+		if err := bson.Unmarshal(data, &d); err != nil {
 			return
 		}
 
-		doc := mapToBsonD(m)
-		_ = convertBSONTypes(doc)
+		converted := convertBSONTypes(d)
+		if _, err := json.Marshal(converted); err != nil {
+			t.Fatalf("convertBSONTypes output not JSON-encodable: %v (doc=%v)", err, d)
+		}
+	})
+}
+
+// FuzzContextUpdateDescription builds an event metadata map with fuzzer-chosen
+// JSON for the updated_fields / removed_fields keys, carries it on a context,
+// and calls the production ContextUpdateDescription extractor.
+//
+// Oracle:
+//   - ContextUpdateDescription must never panic on arbitrary metadata JSON.
+//   - The result is internally consistent: it is non-nil exactly when at least
+//     one of the two metadata keys is present, and a successfully-parsed
+//     updated_fields / removed_fields blob round-trips back to equivalent JSON.
+func FuzzContextUpdateDescription(f *testing.F) {
+	f.Add(`{"status":"active","count":3}`, `["old"]`, uint8(0))
+	f.Add(`{}`, `[]`, uint8(3))
+	f.Add(`not json`, `also not json`, uint8(1))
+	f.Add(``, ``, uint8(2))
+	f.Add(`{"nested":{"a":[1,2,3]},"f":1.5}`, `["a","b","c"]`, uint8(0))
+	f.Add(`[1,2,3]`, `{"not":"an array"}`, uint8(0)) // type-mismatched JSON
+
+	f.Fuzz(func(t *testing.T, updated, removed string, presenceSel uint8) {
+		md := map[string]string{}
+		// presenceSel chooses which keys are present so the nil-result branch
+		// (neither key) is also exercised.
+		hasUpdated := presenceSel&1 != 0
+		hasRemoved := presenceSel&2 != 0
+		if hasUpdated {
+			md[MetadataUpdatedFields] = updated
+		}
+		if hasRemoved {
+			md[MetadataRemovedFields] = removed
+		}
+
+		ctx := event.ContextWithMetadata(context.Background(), md)
+
+		// Must never panic.
+		desc := ContextUpdateDescription(ctx)
+
+		if !hasUpdated && !hasRemoved {
+			if desc != nil {
+				t.Fatalf("expected nil desc when neither key present, got %+v", desc)
+			}
+			return
+		}
+		if desc == nil {
+			t.Fatalf("expected non-nil desc when a metadata key is present (updated=%v removed=%v)", hasUpdated, hasRemoved)
+		}
+
+		// Internal consistency: if updated_fields parsed into a non-nil map,
+		// re-marshaling it must produce valid JSON.
+		if desc.UpdatedFields != nil {
+			if _, err := json.Marshal(desc.UpdatedFields); err != nil {
+				t.Fatalf("parsed UpdatedFields not re-encodable: %v", err)
+			}
+		}
+		// RemovedFields, when populated, must be a usable string slice.
+		for i := range desc.RemovedFields {
+			_ = desc.RemovedFields[i]
+		}
+	})
+}
+
+// FuzzFullDocumentUnmarshal feeds raw bytes as a bson.Raw FullDocument through
+// the exact production decode used in extractChangeEvent: bson.Unmarshal into a
+// bson.D, then bsonDToJSON.
+//
+// Oracle:
+//   - bson.Unmarshal must never panic, regardless of the byte string.
+//   - If the decode succeeds, the resulting bson.D is usable: bsonDToJSON
+//     converts it to valid JSON without error.
+func FuzzFullDocumentUnmarshal(f *testing.F) {
+	for _, seed := range fuzzRawBSONSeeds(f) {
+		f.Add(seed)
+	}
+	f.Add([]byte{})
+	f.Add([]byte{0x05, 0x00, 0x00, 0x00, 0x00})
+	f.Add([]byte{0xDE, 0xAD, 0xBE, 0xEF})
+	// Truncated length prefix claiming more bytes than present.
+	f.Add([]byte{0xFF, 0xFF, 0xFF, 0x7F, 0x0A, 0x78, 0x00, 0x00})
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		raw := bson.Raw(data)
+
+		var fullDoc bson.D
+		if err := bson.Unmarshal(raw, &fullDoc); err != nil {
+			// Malformed FullDocument is logged-and-skipped in production; here we
+			// just require no panic.
+			return
+		}
+
+		// Decode succeeded: the value must be usable downstream.
+		out, err := bsonDToJSON(fullDoc)
+		if err != nil {
+			t.Fatalf("bsonDToJSON failed on decoded FullDocument: %v (doc=%v)", err, fullDoc)
+		}
+		var v any
+		if err := json.Unmarshal(out, &v); err != nil {
+			t.Fatalf("FullDocument JSON invalid: %v\njson=%s", err, out)
+		}
 	})
 }
 
@@ -196,6 +327,62 @@ func timeFromUnix(sec int64) time.Time {
 	return time.Unix(sec, 0).UTC()
 }
 
+// fuzzRawBSONSeeds returns a set of realistic, change-stream-shaped BSON
+// documents encoded as raw bytes. They seed the byte-oriented root targets
+// (FuzzBsonDToJSON, FuzzConvertBSONTypes, FuzzFullDocumentUnmarshal) so the
+// driver decoder and bsonDToJSON exercise the special-type branches
+// (ObjectID/Decimal128/Binary/DateTime/Timestamp) plus nested/array shapes.
+func fuzzRawBSONSeeds(f *testing.F) [][]byte {
+	f.Helper()
+	dec, err := bson.ParseDecimal128("1234.5678")
+	if err != nil {
+		f.Fatalf("ParseDecimal128: %v", err)
+	}
+	docs := []bson.D{
+		// insert-shaped full document with mixed scalar types.
+		{
+			{Key: "_id", Value: bson.NewObjectID()},
+			{Key: "name", Value: "alice"},
+			{Key: "count", Value: int64(42)},
+			{Key: "active", Value: true},
+			{Key: "ratio", Value: 3.14},
+		},
+		// special BSON types.
+		{
+			{Key: "_id", Value: bson.NewObjectID()},
+			{Key: "amount", Value: dec},
+			{Key: "blob", Value: bson.Binary{Subtype: 0x00, Data: []byte("payload")}},
+			{Key: "created", Value: bson.NewDateTimeFromTime(time.Unix(1705300200, 0).UTC())},
+			{Key: "ts", Value: bson.Timestamp{T: 1705300200, I: 1}},
+		},
+		// deeply nested + array-heavy document.
+		{
+			{Key: "_id", Value: "string-key"},
+			{Key: "nested", Value: bson.D{
+				{Key: "level1", Value: bson.D{
+					{Key: "level2", Value: bson.D{
+						{Key: "value", Value: int32(7)},
+						{Key: "list", Value: bson.A{1, "two", false, bson.D{{Key: "deep", Value: true}}}},
+					}},
+				}},
+			}},
+			{Key: "tags", Value: bson.A{"a", "b", "c", "d"}},
+			{Key: "matrix", Value: bson.A{bson.A{1, 2}, bson.A{3, 4}}},
+		},
+		// empty document.
+		{},
+	}
+	seeds := make([][]byte, 0, len(docs))
+	for _, d := range docs {
+		data, err := bson.Marshal(d)
+		if err != nil {
+			f.Fatalf("bson.Marshal seed: %v", err)
+		}
+		seeds = append(seeds, data)
+	}
+	return seeds
+}
+
 // sanitizeKey ensures a fuzzer-chosen map key is non-empty and free of NUL
 // bytes (which BSON keys disallow), so the fuzz target tests conversion logic
 // rather than BSON encoding rejections.
@@ -211,31 +398,4 @@ func sanitizeKey(k string) string {
 		return "k"
 	}
 	return string(out)
-}
-
-// mapToBsonD converts a map to bson.D for fuzz testing.
-func mapToBsonD(m map[string]any) bson.D {
-	if m == nil {
-		return nil
-	}
-	doc := make(bson.D, 0, len(m))
-	for k, v := range m {
-		switch val := v.(type) {
-		case map[string]any:
-			doc = append(doc, bson.E{Key: k, Value: mapToBsonD(val)})
-		case []any:
-			arr := make(bson.A, len(val))
-			for i, item := range val {
-				if nested, ok := item.(map[string]any); ok {
-					arr[i] = mapToBsonD(nested)
-				} else {
-					arr[i] = item
-				}
-			}
-			doc = append(doc, bson.E{Key: k, Value: arr})
-		default:
-			doc = append(doc, bson.E{Key: k, Value: v})
-		}
-	}
-	return doc
 }

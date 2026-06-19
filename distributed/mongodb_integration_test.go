@@ -2,73 +2,40 @@ package distributed
 
 import (
 	"context"
-	"fmt"
-	"os"
 	"sync"
 	"testing"
 	"time"
 
-	"go.mongodb.org/mongo-driver/v2/mongo"
-	"go.mongodb.org/mongo-driver/v2/mongo/options"
-
 	evtdistributed "github.com/rbaliyan/event/v3/distributed"
-)
 
-func getMongoURI() string {
-	if uri := os.Getenv("MONGO_URI"); uri != "" {
-		return uri
-	}
-	return "mongodb://localhost:27018/?directConnection=true"
-}
+	"github.com/rbaliyan/event-mongodb/internal/mongotest"
+)
 
 // setupDistributedIntegrationTest connects to MongoDB and returns a
 // MongoStateManager over a unique per-test database. Tests skip when MongoDB
-// is unavailable or when -short is set.
+// is unavailable or when -short is set. Teardown is registered via t.Cleanup so
+// it runs even if a test panics.
 func setupDistributedIntegrationTest(t *testing.T, opts ...Option) (*MongoStateManager, func()) {
 	t.Helper()
 
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
+	client := mongotest.Connect(t)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-
-	uri := getMongoURI()
-	client, err := mongo.Connect(options.Client().ApplyURI(uri))
-	if err != nil {
-		cancel()
-		t.Skipf("MongoDB not available: %v", err)
-	}
-	if err := client.Ping(ctx, nil); err != nil {
-		cancel()
-		_ = client.Disconnect(ctx)
-		t.Skipf("MongoDB not available: %v", err)
-	}
-
-	dbName := fmt.Sprintf("test_event_mongodb_distributed_%d_%s",
-		os.Getpid(), time.Now().Format("20060102150405.000000"))
-	db := client.Database(dbName)
+	db := client.Database(mongotest.UniqueDBName("test_event_mongodb_distributed"))
 
 	mgr, err := NewMongoStateManager(db, opts...)
 	if err != nil {
-		cancel()
 		_ = db.Drop(context.Background())
-		_ = client.Disconnect(context.Background())
 		t.Fatalf("NewMongoStateManager: %v", err)
 	}
 
-	cleanup := func() {
-		_ = db.Drop(context.Background())
-		_ = client.Disconnect(context.Background())
-		cancel()
-	}
+	cleanup := func() { _ = db.Drop(context.Background()) }
+	t.Cleanup(cleanup)
 
 	return mgr, cleanup
 }
 
 func TestIntegrationAcquireAndReacquire(t *testing.T) {
-	mgr, cleanup := setupDistributedIntegrationTest(t)
-	defer cleanup()
+	mgr, _ := setupDistributedIntegrationTest(t)
 
 	ctx := context.Background()
 
@@ -96,8 +63,7 @@ func TestIntegrationAcquireAndReacquire(t *testing.T) {
 // already held (return false) via the duplicate-key / held-lease paths. Any
 // unexpected error fails the test.
 func TestIntegration_ConcurrentAcquire(t *testing.T) {
-	mgr, cleanup := setupDistributedIntegrationTest(t)
-	defer cleanup()
+	mgr, _ := setupDistributedIntegrationTest(t)
 
 	ctx := context.Background()
 	const (
@@ -140,8 +106,7 @@ func TestIntegration_ConcurrentAcquire(t *testing.T) {
 }
 
 func TestIntegrationAcquireExpiredLease(t *testing.T) {
-	mgr, cleanup := setupDistributedIntegrationTest(t)
-	defer cleanup()
+	mgr, _ := setupDistributedIntegrationTest(t)
 
 	ctx := context.Background()
 
@@ -162,8 +127,7 @@ func TestIntegrationAcquireExpiredLease(t *testing.T) {
 }
 
 func TestIntegrationMarkProcessedBlocksReacquire(t *testing.T) {
-	mgr, cleanup := setupDistributedIntegrationTest(t, WithCompletedTTL(time.Hour))
-	defer cleanup()
+	mgr, _ := setupDistributedIntegrationTest(t, WithCompletedTTL(time.Hour))
 
 	ctx := context.Background()
 
@@ -187,8 +151,7 @@ func TestIntegrationMarkProcessedBlocksReacquire(t *testing.T) {
 }
 
 func TestIntegrationResetAllowsReacquire(t *testing.T) {
-	mgr, cleanup := setupDistributedIntegrationTest(t)
-	defer cleanup()
+	mgr, _ := setupDistributedIntegrationTest(t)
 
 	ctx := context.Background()
 
@@ -211,8 +174,7 @@ func TestIntegrationResetAllowsReacquire(t *testing.T) {
 }
 
 func TestIntegrationListAndResetStale(t *testing.T) {
-	mgr, cleanup := setupDistributedIntegrationTest(t)
-	defer cleanup()
+	mgr, _ := setupDistributedIntegrationTest(t)
 
 	ctx := context.Background()
 
@@ -253,8 +215,7 @@ func TestIntegrationListAndResetStale(t *testing.T) {
 }
 
 func TestIntegrationPayloadLifecycle(t *testing.T) {
-	mgr, cleanup := setupDistributedIntegrationTest(t)
-	defer cleanup()
+	mgr, _ := setupDistributedIntegrationTest(t)
 
 	ctx := context.Background()
 
@@ -309,8 +270,7 @@ func TestIntegrationPayloadLifecycle(t *testing.T) {
 }
 
 func TestIntegrationStorePayloadNilIgnored(t *testing.T) {
-	mgr, cleanup := setupDistributedIntegrationTest(t)
-	defer cleanup()
+	mgr, _ := setupDistributedIntegrationTest(t)
 
 	ctx := context.Background()
 
@@ -323,8 +283,7 @@ func TestIntegrationStorePayloadNilIgnored(t *testing.T) {
 }
 
 func TestIntegrationEnsureIndexes(t *testing.T) {
-	mgr, cleanup := setupDistributedIntegrationTest(t)
-	defer cleanup()
+	mgr, _ := setupDistributedIntegrationTest(t)
 
 	if err := mgr.EnsureIndexes(context.Background()); err != nil {
 		t.Fatalf("EnsureIndexes: %v", err)
@@ -332,9 +291,8 @@ func TestIntegrationEnsureIndexes(t *testing.T) {
 }
 
 func TestIntegrationCappedCollectionLifecycle(t *testing.T) {
-	mgr, cleanup := setupDistributedIntegrationTest(t,
+	mgr, _ := setupDistributedIntegrationTest(t,
 		WithCapped(64*1024, 0))
-	defer cleanup()
 
 	ctx := context.Background()
 

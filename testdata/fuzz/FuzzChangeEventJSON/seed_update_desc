@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("{\"operation_type\":\"update\",\"document_key\":\"abc\",\"update_description\":{\"updated_fields\":{\"status\":\"shipped\"},\"removed_fields\":[\"temp\"]}}")

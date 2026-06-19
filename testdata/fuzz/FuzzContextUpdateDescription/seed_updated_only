@@ -1,0 +1,4 @@
+go test fuzz v1
+string("{\"nested\":{\"a\":[1,2,3]},\"flag\":true}")
+string("")
+byte('\x01')

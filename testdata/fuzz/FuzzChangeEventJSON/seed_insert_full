@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("{\"operation_type\":\"insert\",\"database\":\"shop\",\"collection\":\"orders\",\"document_key\":\"507f1f77bcf86cd799439011\",\"full_document\":{\"name\":\"John\",\"total\":99.5},\"namespace\":\"shop.orders\"}")

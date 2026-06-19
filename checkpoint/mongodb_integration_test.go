@@ -2,71 +2,38 @@ package checkpoint
 
 import (
 	"context"
-	"fmt"
-	"os"
 	"testing"
 	"time"
 
-	"go.mongodb.org/mongo-driver/v2/mongo"
-	"go.mongodb.org/mongo-driver/v2/mongo/options"
+	"github.com/rbaliyan/event-mongodb/internal/mongotest"
 )
-
-func getMongoURI() string {
-	if uri := os.Getenv("MONGO_URI"); uri != "" {
-		return uri
-	}
-	return "mongodb://localhost:27018/?directConnection=true"
-}
 
 // setupCheckpointIntegrationTest connects to MongoDB and returns a MongoStore
 // over a unique per-test database. Tests skip when MongoDB is unavailable or
-// when -short is set.
+// when -short is set. Teardown is registered via t.Cleanup so it runs even if a
+// test panics.
 func setupCheckpointIntegrationTest(t *testing.T, opts ...MongoOption) (*MongoStore, func()) {
 	t.Helper()
 
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
+	client := mongotest.Connect(t)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-
-	uri := getMongoURI()
-	client, err := mongo.Connect(options.Client().ApplyURI(uri))
-	if err != nil {
-		cancel()
-		t.Skipf("MongoDB not available: %v", err)
-	}
-	if err := client.Ping(ctx, nil); err != nil {
-		cancel()
-		_ = client.Disconnect(ctx)
-		t.Skipf("MongoDB not available: %v", err)
-	}
-
-	dbName := fmt.Sprintf("test_event_mongodb_checkpoint_%d_%s",
-		os.Getpid(), time.Now().Format("20060102150405.000000"))
-	db := client.Database(dbName)
+	db := client.Database(mongotest.UniqueDBName("test_event_mongodb_checkpoint"))
 	coll := db.Collection("checkpoints")
 
 	store, err := NewMongoStore(coll, opts...)
 	if err != nil {
-		cancel()
 		_ = db.Drop(context.Background())
-		_ = client.Disconnect(context.Background())
 		t.Fatalf("NewMongoStore: %v", err)
 	}
 
-	cleanup := func() {
-		_ = db.Drop(context.Background())
-		_ = client.Disconnect(context.Background())
-		cancel()
-	}
+	cleanup := func() { _ = db.Drop(context.Background()) }
+	t.Cleanup(cleanup)
 
 	return store, cleanup
 }
 
 func TestIntegrationSaveLoadRoundTrip(t *testing.T) {
-	s, cleanup := setupCheckpointIntegrationTest(t)
-	defer cleanup()
+	s, _ := setupCheckpointIntegrationTest(t)
 
 	ctx := context.Background()
 	pos := time.Now().UTC().Truncate(time.Millisecond)
@@ -85,8 +52,7 @@ func TestIntegrationSaveLoadRoundTrip(t *testing.T) {
 }
 
 func TestIntegrationLoadMissing(t *testing.T) {
-	s, cleanup := setupCheckpointIntegrationTest(t)
-	defer cleanup()
+	s, _ := setupCheckpointIntegrationTest(t)
 
 	got, err := s.Load(context.Background(), "does-not-exist")
 	if err != nil {
@@ -98,8 +64,7 @@ func TestIntegrationLoadMissing(t *testing.T) {
 }
 
 func TestIntegrationSaveOverwrites(t *testing.T) {
-	s, cleanup := setupCheckpointIntegrationTest(t)
-	defer cleanup()
+	s, _ := setupCheckpointIntegrationTest(t)
 
 	ctx := context.Background()
 	first := time.Now().UTC().Truncate(time.Millisecond)
@@ -122,8 +87,7 @@ func TestIntegrationSaveOverwrites(t *testing.T) {
 }
 
 func TestIntegrationDeleteAndDeleteAll(t *testing.T) {
-	s, cleanup := setupCheckpointIntegrationTest(t)
-	defer cleanup()
+	s, _ := setupCheckpointIntegrationTest(t)
 
 	ctx := context.Background()
 	now := time.Now().UTC().Truncate(time.Millisecond)
@@ -158,8 +122,7 @@ func TestIntegrationDeleteAndDeleteAll(t *testing.T) {
 }
 
 func TestIntegrationListAndGetAll(t *testing.T) {
-	s, cleanup := setupCheckpointIntegrationTest(t)
-	defer cleanup()
+	s, _ := setupCheckpointIntegrationTest(t)
 
 	ctx := context.Background()
 	want := map[string]time.Time{
@@ -195,8 +158,7 @@ func TestIntegrationListAndGetAll(t *testing.T) {
 }
 
 func TestIntegrationGetCheckpointInfo(t *testing.T) {
-	s, cleanup := setupCheckpointIntegrationTest(t)
-	defer cleanup()
+	s, _ := setupCheckpointIntegrationTest(t)
 
 	ctx := context.Background()
 
@@ -232,8 +194,7 @@ func TestIntegrationGetCheckpointInfo(t *testing.T) {
 }
 
 func TestIntegrationEnsureIndexes(t *testing.T) {
-	s, cleanup := setupCheckpointIntegrationTest(t, WithMongoTTL(time.Hour))
-	defer cleanup()
+	s, _ := setupCheckpointIntegrationTest(t, WithMongoTTL(time.Hour))
 
 	if err := s.EnsureIndexes(context.Background()); err != nil {
 		t.Fatalf("EnsureIndexes: %v", err)

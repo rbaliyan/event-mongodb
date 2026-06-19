@@ -2,8 +2,8 @@ package mongodb
 
 import (
 	"context"
-	"fmt"
-	"os"
+	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -12,6 +12,9 @@ import (
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+
+	"github.com/rbaliyan/event-mongodb/internal/mongotest"
 
 	// Blank import registers the BSON payload codec ("application/bson") in the
 	// global event payload registry, enabling typed decode for FullDocumentOnly
@@ -30,56 +33,29 @@ type fdoOrder struct {
 	Status     string        `bson:"status"`
 }
 
-func getMongoURI() string {
-	if uri := os.Getenv("MONGO_URI"); uri != "" {
-		return uri
-	}
-	return "mongodb://localhost:27018/?directConnection=true"
-}
-
 func setupIntegrationTest(t *testing.T) (*mongo.Client, *mongo.Database, func()) {
 	t.Helper()
 
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
+	// mongotest.Connect handles -short skip, connect, ping, and registers the
+	// client disconnect via t.Cleanup. Change streams additionally require a
+	// replica set, which is this package's local precondition (checked below).
+	client := mongotest.Connect(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 
-	client, err := mongo.Connect(options.Client().ApplyURI(getMongoURI()))
-	if err != nil {
-		cancel()
-		t.Skipf("MongoDB not available: %v", err)
-	}
-
-	if err := client.Ping(ctx, nil); err != nil {
-		cancel()
-		_ = client.Disconnect(ctx)
-		t.Skipf("MongoDB not available: %v", err)
-	}
-
-	// Check for replica set
+	// Check for replica set — change streams require it.
 	var result bson.M
 	if err := client.Database("admin").RunCommand(ctx, bson.M{"replSetGetStatus": 1}).Decode(&result); err != nil {
-		cancel()
-		_ = client.Disconnect(ctx)
 		t.Skipf("MongoDB replica set not available: %v", err)
 	}
 
-	// Use nanosecond + PID resolution to avoid collisions between tests that
-	// start within the same second (matches the subpackages' naming pattern).
-	dbName := fmt.Sprintf("test_event_mongodb_%d_%s",
-		os.Getpid(), time.Now().Format("20060102150405.000000"))
-	db := client.Database(dbName)
+	db := client.Database(mongotest.UniqueDBName("test_event_mongodb"))
 
-	cleanup := func() {
-		_ = db.Drop(context.Background())
-		_ = client.Disconnect(context.Background())
-		cancel()
-	}
-	// Use t.Cleanup so the database is dropped even if a test panics after
-	// connecting (a bare defer would be skipped on panic in a helper-spawned
-	// goroutine path). Callers no longer need to defer cleanup themselves.
+	// Drop the database on cleanup. Registered after the client-disconnect
+	// cleanup inside mongotest.Connect, so (LIFO) the drop runs first while the
+	// client is still connected. Returned for symmetry with older callers.
+	cleanup := func() { _ = db.Drop(context.Background()) }
 	t.Cleanup(cleanup)
 
 	return client, db, cleanup
@@ -639,13 +615,26 @@ func TestIntegration_ResumeTokenPersistence(t *testing.T) {
 		t.Fatal("Timeout waiting for first event")
 	}
 
-	// Give the throttled resume-token saver a chance to persist progress before
-	// closing, so transport2 resumes from after batch-1 rather than re-reading it.
-	time.Sleep(resumeTokenSaveInterval + time.Second)
+	// Wait (bounded) for the throttled resume-token saver to persist progress
+	// before closing, so transport2 resumes from after batch-1 rather than
+	// re-reading it. Instead of a fixed sleep tied to resumeTokenSaveInterval,
+	// poll the default _event_resume_tokens collection directly until a token
+	// is stored for this transport's key. The transport auto-creates its store
+	// in this collection, so we read through an equivalent store.
+	tokenProbe, err := NewMongoResumeTokenStore(db.Collection(defaultResumeTokenCollection))
+	if err != nil {
+		t.Fatalf("NewMongoResumeTokenStore(probe): %v", err)
+	}
+	resumeKey := transport1.ResumeTokenKey()
+	if !eventuallyIntegration(resumeTokenSaveInterval+10*time.Second, func() bool {
+		tok, loadErr := tokenProbe.Load(ctx, resumeKey)
+		return loadErr == nil && len(tok) > 0
+	}) {
+		t.Fatal("timed out waiting for resume token to be persisted before close")
+	}
 
 	// Close first transport
 	bus1.Close(ctx)
-	time.Sleep(1 * time.Second)
 
 	// Insert document while transport is down
 	_, err = coll.InsertOne(ctx, bson.M{"batch": 2, "index": 2})
@@ -845,7 +834,7 @@ func TestIntegration_ReconnectAfterClose(t *testing.T) {
 	}
 	_ = client // client retained for symmetry with other setups
 
-	newTransport := func() (*event.Bus, event.Event[ChangeEvent], chan ChangeEvent) {
+	newTransport := func() (*event.Bus, *Transport, chan ChangeEvent) {
 		t.Helper()
 		tr, err := New(db,
 			WithCollection("orders"),
@@ -874,13 +863,13 @@ func TestIntegration_ReconnectAfterClose(t *testing.T) {
 		}); err != nil {
 			t.Fatalf("Subscribe() error: %v", err)
 		}
-		return bus, ev, ch
+		return bus, tr, ch
 	}
 
 	coll := db.Collection("orders")
 
 	// First transport: establish and persist a resume position.
-	bus1, _, ch1 := newTransport()
+	bus1, bus1Transport, ch1 := newTransport()
 	waitForStreamReady(t, ctx, coll, ch1)
 	if _, err := coll.InsertOne(ctx, bson.M{"phase": "before-close"}); err != nil {
 		t.Fatalf("InsertOne(before-close): %v", err)
@@ -890,8 +879,18 @@ func TestIntegration_ReconnectAfterClose(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("first transport did not receive pre-close change")
 	}
-	// Let the throttled saver persist the position before closing.
-	time.Sleep(resumeTokenSaveInterval + time.Second)
+	// Wait (bounded) for the throttled saver to persist a position before
+	// closing, polling the shared token store directly instead of sleeping for
+	// resumeTokenSaveInterval. The first save may be the initial position (saved
+	// immediately on first start) or the post-change token; either is non-empty
+	// and sufficient for the second transport to resume from.
+	reconnectKey := bus1Transport.ResumeTokenKey()
+	if !eventuallyIntegration(resumeTokenSaveInterval+10*time.Second, func() bool {
+		tok, loadErr := tokenStore.Load(ctx, reconnectKey)
+		return loadErr == nil && len(tok) > 0
+	}) {
+		t.Fatal("timed out waiting for resume token to be persisted before close")
+	}
 	bus1.Close(ctx)
 
 	// Write a change while no transport is watching.
@@ -1482,6 +1481,564 @@ func TestIntegration_ClusterWatch(t *testing.T) {
 			}
 		case <-deadline:
 			t.Fatal("timeout waiting for cluster-level change event")
+		}
+	}
+}
+
+// TestIntegration_MetricsReflectStreamActivity wires the transport to a real
+// OTel Metrics instance backed by a ManualReader (mirroring metrics_test.go),
+// drives a real change through the change stream, and asserts that transport-
+// and handler-level instruments actually moved:
+//
+//   - mongodb_stream_active > 0 while the stream is open (transport-level
+//     UpDownCounter recorded by the transport itself).
+//   - mongodb_stream_receive_lag_seconds recorded at least once (transport-level
+//     histogram, recorded before any handler runs).
+//   - mongodb_changes_processed_total > 0 (handler-level counter recorded by the
+//     MetricsMiddleware wired onto the subscription).
+func TestIntegration_MetricsReflectStreamActivity(t *testing.T) {
+	_, db, _ := setupIntegrationTest(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Deterministic, in-process metrics pipeline — no external collector.
+	reader := sdkmetric.NewManualReader()
+	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	t.Cleanup(func() { _ = provider.Shutdown(context.Background()) })
+
+	metrics, err := NewMetrics(WithMeterProvider(provider))
+	if err != nil {
+		t.Fatalf("NewMetrics: %v", err)
+	}
+	t.Cleanup(func() { _ = metrics.Close() })
+
+	transport, err := New(db,
+		WithCollection("orders"),
+		WithFullDocument(FullDocumentUpdateLookup),
+		WithMetrics(metrics),
+		WithoutResume(),
+	)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+
+	bus, err := event.NewBus("metrics-bus", event.WithTransport(transport))
+	if err != nil {
+		t.Fatalf("NewBus() error: %v", err)
+	}
+	defer bus.Close(ctx)
+
+	orderChanges := event.New[ChangeEvent]("order.changes")
+	if err := event.Register(ctx, bus, orderChanges); err != nil {
+		t.Fatalf("Register() error: %v", err)
+	}
+
+	received := make(chan ChangeEvent, 8)
+	// Wire the handler-level metrics middleware so changes_processed_total moves.
+	if err := orderChanges.Subscribe(ctx,
+		func(ctx context.Context, ev event.Event[ChangeEvent], change ChangeEvent) error {
+			select {
+			case received <- change:
+			default:
+			}
+			return nil
+		},
+		event.WithMiddleware(MetricsMiddleware[ChangeEvent](metrics)),
+	); err != nil {
+		t.Fatalf("Subscribe() error: %v", err)
+	}
+
+	coll := db.Collection("orders")
+	waitForStreamReady(t, ctx, coll, received)
+
+	// While the stream is live, the transport-level active-stream gauge must be
+	// positive. Poll the ManualReader until it observes the open stream.
+	if !eventuallyIntegration(10*time.Second, func() bool {
+		rm := collectMetrics(t, reader)
+		return sumCounter(findMetric(rm, "mongodb_stream_active")) > 0
+	}) {
+		t.Fatal("mongodb_stream_active never became > 0 while stream open")
+	}
+
+	// Drive a real change and wait for the handler to observe it.
+	if _, err := coll.InsertOne(ctx, bson.M{"product": "metrics-doc"}); err != nil {
+		t.Fatalf("InsertOne: %v", err)
+	}
+	select {
+	case <-received:
+	case <-time.After(10 * time.Second):
+		t.Fatal("timeout waiting for change to reach handler")
+	}
+
+	// After the change has been processed, the handler-level processed counter
+	// and the transport-level receive-lag histogram must both have recorded.
+	if !eventuallyIntegration(10*time.Second, func() bool {
+		rm := collectMetrics(t, reader)
+		processed := sumCounter(findMetric(rm, "mongodb_changes_processed_total")) > 0
+		recvLag := histogramCount(findMetric(rm, "mongodb_stream_receive_lag_seconds")) > 0
+		return processed && recvLag
+	}) {
+		rm := collectMetrics(t, reader)
+		t.Fatalf("metrics not recorded: processed=%d receive_lag=%d",
+			sumCounter(findMetric(rm, "mongodb_changes_processed_total")),
+			histogramCount(findMetric(rm, "mongodb_stream_receive_lag_seconds")))
+	}
+}
+
+// TestIntegration_StartFromPast verifies the WithStartFromPast behavior end to
+// end:
+//
+//  1. Write history to a collection, then start a FRESH transport (no saved
+//     token) with WithStartFromPast(d). Changes that occurred within the window
+//     must be replayed.
+//  2. A SECOND start of an equivalent transport that DOES have a saved token
+//     must NOT replay history; it resumes from the saved position. We assert it
+//     does not re-deliver the historical document, but does deliver a brand-new
+//     change written after that token was saved.
+//
+// A shared persistent token store is used across both phases so the second
+// transport observes the position the first one saved.
+func TestIntegration_StartFromPast(t *testing.T) {
+	_, db, _ := setupIntegrationTest(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	coll := db.Collection("orders")
+
+	// Shared token store so phase 2 sees the token phase 1 saves.
+	tokenStore, err := NewMongoResumeTokenStore(db.Collection("_startfrompast_tokens"))
+	if err != nil {
+		t.Fatalf("NewMongoResumeTokenStore: %v", err)
+	}
+	if err := tokenStore.EnsureIndexes(ctx); err != nil {
+		t.Fatalf("EnsureIndexes: %v", err)
+	}
+
+	// Write a historical document BEFORE any transport exists. With
+	// WithStartFromPast, a fresh transport must replay it.
+	const historicalMarker = "historical-doc"
+	if _, err := coll.InsertOne(ctx, bson.M{"product": historicalMarker}); err != nil {
+		t.Fatalf("InsertOne(historical): %v", err)
+	}
+
+	subscribe := func(bus *event.Bus, ev event.Event[ChangeEvent]) chan ChangeEvent {
+		ch := make(chan ChangeEvent, 32)
+		if err := ev.Subscribe(ctx, func(ctx context.Context, e event.Event[ChangeEvent], change ChangeEvent) error {
+			select {
+			case ch <- change:
+			default:
+			}
+			return nil
+		}); err != nil {
+			t.Fatalf("Subscribe() error: %v", err)
+		}
+		return ch
+	}
+
+	// Phase 1: fresh transport, no saved token, WithStartFromPast covering the
+	// historical write. It must replay the historical document.
+	t1, err := New(db,
+		WithCollection("orders"),
+		WithFullDocument(FullDocumentUpdateLookup),
+		WithResumeTokenStore(tokenStore),
+		WithResumeTokenID("startfrompast-instance"),
+		WithStartFromPast(time.Hour),
+	)
+	if err != nil {
+		t.Fatalf("New(phase1) error: %v", err)
+	}
+	bus1, err := event.NewBus("startpast-bus-1", event.WithTransport(t1))
+	if err != nil {
+		t.Fatalf("NewBus(phase1) error: %v", err)
+	}
+	ev1 := event.New[ChangeEvent]("order.changes")
+	if err := event.Register(ctx, bus1, ev1); err != nil {
+		t.Fatalf("Register(phase1) error: %v", err)
+	}
+	ch1 := subscribe(bus1, ev1)
+
+	gotHistorical := false
+	deadline := time.After(20 * time.Second)
+phase1:
+	for {
+		select {
+		case change := <-ch1:
+			if change.OperationType == OperationInsert && jsonContains(change.FullDocument, historicalMarker) {
+				gotHistorical = true
+				break phase1
+			}
+		case <-deadline:
+			break phase1
+		}
+	}
+	if !gotHistorical {
+		bus1.Close(ctx)
+		t.Fatal("WithStartFromPast did not replay the historical document")
+	}
+
+	// Wait (bounded) for a resume token to be persisted so phase 2 has a saved
+	// position to resume from.
+	resumeKey := t1.ResumeTokenKey()
+	if !eventuallyIntegration(resumeTokenSaveInterval+15*time.Second, func() bool {
+		tok, loadErr := tokenStore.Load(ctx, resumeKey)
+		return loadErr == nil && len(tok) > 0
+	}) {
+		bus1.Close(ctx)
+		t.Fatal("timed out waiting for resume token to persist after phase 1")
+	}
+	bus1.Close(ctx)
+
+	// Phase 2: equivalent transport WITH the saved token. WithStartFromPast must
+	// be ignored on this start (token takes precedence), so the historical
+	// document must NOT be replayed. A new change written after the token must
+	// still be delivered, proving the stream resumed rather than starting fresh.
+	t2, err := New(db,
+		WithCollection("orders"),
+		WithFullDocument(FullDocumentUpdateLookup),
+		WithResumeTokenStore(tokenStore),
+		WithResumeTokenID("startfrompast-instance"),
+		WithStartFromPast(time.Hour),
+	)
+	if err != nil {
+		t.Fatalf("New(phase2) error: %v", err)
+	}
+	bus2, err := event.NewBus("startpast-bus-2", event.WithTransport(t2))
+	if err != nil {
+		t.Fatalf("NewBus(phase2) error: %v", err)
+	}
+	defer bus2.Close(ctx)
+	ev2 := event.New[ChangeEvent]("order.changes")
+	if err := event.Register(ctx, bus2, ev2); err != nil {
+		t.Fatalf("Register(phase2) error: %v", err)
+	}
+	ch2 := subscribe(bus2, ev2)
+
+	// Write a fresh sentinel that phase 2 must deliver. When we see it we know
+	// the resume stream is live and caught up; the historical document must not
+	// have appeared before it.
+	const freshMarker = "post-resume-doc"
+	if _, err := coll.InsertOne(ctx, bson.M{"product": freshMarker}); err != nil {
+		t.Fatalf("InsertOne(fresh): %v", err)
+	}
+
+	deadline2 := time.After(20 * time.Second)
+	for {
+		select {
+		case change := <-ch2:
+			if change.OperationType != OperationInsert {
+				continue
+			}
+			if jsonContains(change.FullDocument, historicalMarker) {
+				t.Fatal("phase 2 replayed the historical document; resume from token did not take precedence over WithStartFromPast")
+			}
+			if jsonContains(change.FullDocument, freshMarker) {
+				return // resumed correctly: fresh change delivered, no replay
+			}
+		case <-deadline2:
+			t.Fatal("phase 2 did not deliver the post-resume change")
+		}
+	}
+}
+
+// jsonContains reports whether the raw JSON payload contains the given
+// substring. Used to identify which document a ChangeEvent carried without
+// fully decoding it.
+func jsonContains(raw []byte, substr string) bool {
+	return len(raw) > 0 && bytesContains(raw, substr)
+}
+
+// bytesContains is a tiny substring check over a byte slice, avoiding a
+// dependency on strings/bytes import churn at call sites.
+func bytesContains(b []byte, substr string) bool {
+	s := string(b)
+	for i := 0; i+len(substr) <= len(s); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
+}
+
+// TestIntegration_MidStreamConnectivityLossRecovery exercises the transport's
+// reconnect/backoff path against a real mid-stream connectivity loss. A tiny
+// in-process TCP proxy sits between the transport's MongoDB client and the real
+// MongoDB host:port. The test:
+//
+//  1. starts watching through the proxy and confirms delivery,
+//  2. severs all proxied connections (simulating a network blip),
+//  3. writes a change during the outage,
+//  4. restores the proxy and asserts delivery resumes after the transport's
+//     backoff/reconnect.
+//
+// The proxy only forwards a single MongoDB host:port. It therefore requires a
+// directConnection-style single-node deployment. If the resolved deployment is
+// not reachable as a single host:port through the proxy (e.g. a multi-host
+// replica set the driver insists on contacting directly), the test skips with a
+// clear reason rather than flaking.
+func TestIntegration_MidStreamConnectivityLossRecovery(t *testing.T) {
+	// Establish the real deployment is reachable and is a replica set (needed
+	// for change streams). This also gives us a known-good URI to derive the
+	// upstream host:port from.
+	client, db, _ := setupIntegrationTest(t)
+	_ = client // connection/replica-set precondition is enforced by setup.
+
+	upstream, ok := singleHostFromURI(mongotest.URI())
+	if !ok {
+		t.Skip("proxy test requires a single host:port URI (directConnection); MONGO_URI exposes multiple hosts or an SRV record")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	proxy, err := newTCPProxy(upstream)
+	if err != nil {
+		t.Skipf("could not start in-process TCP proxy: %v", err)
+	}
+	defer proxy.Close()
+
+	// A second client pointed at the proxy. directConnection avoids replica-set
+	// topology discovery that would bypass the proxy address.
+	proxyURI := "mongodb://" + proxy.Addr() + "/?directConnection=true"
+	proxyClient, err := mongo.Connect(options.Client().ApplyURI(proxyURI))
+	if err != nil {
+		t.Skipf("could not connect through proxy: %v", err)
+	}
+	defer func() { _ = proxyClient.Disconnect(context.Background()) }()
+
+	pingCtx, pingCancel := context.WithTimeout(ctx, 10*time.Second)
+	pingErr := proxyClient.Ping(pingCtx, nil)
+	pingCancel()
+	if pingErr != nil {
+		t.Skipf("MongoDB not reachable through proxy: %v", pingErr)
+	}
+
+	// Watch the SAME database (by name) but through the proxied client so writes
+	// made on the direct client are observed via the proxied change stream.
+	proxyDB := proxyClient.Database(db.Name())
+	coll := db.Collection("orders") // write via the direct client
+	transport, err := New(proxyDB,
+		WithCollection("orders"),
+		WithFullDocument(FullDocumentUpdateLookup),
+		WithoutResume(),
+	)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+	bus, err := event.NewBus("proxy-bus", event.WithTransport(transport))
+	if err != nil {
+		t.Fatalf("NewBus() error: %v", err)
+	}
+	defer bus.Close(ctx)
+
+	ev := event.New[ChangeEvent]("order.changes")
+	if err := event.Register(ctx, bus, ev); err != nil {
+		t.Fatalf("Register() error: %v", err)
+	}
+	received := make(chan ChangeEvent, 32)
+	if err := ev.Subscribe(ctx, func(ctx context.Context, e event.Event[ChangeEvent], change ChangeEvent) error {
+		select {
+		case received <- change:
+		default:
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("Subscribe() error: %v", err)
+	}
+
+	// Confirm the stream is live through the proxy before disrupting it.
+	waitForStreamReady(t, ctx, coll, received)
+
+	// Sever all proxied connections mid-stream. New connects are still accepted
+	// by the proxy, but every existing tunnel is torn down, which the driver
+	// surfaces as a stream error and the transport must recover from.
+	proxy.SeverAll()
+
+	// Write a change during/after the outage. The direct client is unaffected
+	// by the proxy, so the write lands in the oplog; the proxied stream must
+	// pick it up once it reconnects.
+	const marker = "after-outage"
+	if _, err := coll.InsertOne(ctx, bson.M{"product": marker}); err != nil {
+		t.Fatalf("InsertOne(after-outage): %v", err)
+	}
+
+	// Give the transport a moment to notice the broken stream, then allow new
+	// connections to flow again (they already are; SeverAll only dropped the
+	// existing ones). Assert delivery resumes after backoff/reconnect.
+	deadline := time.After(45 * time.Second)
+	for {
+		select {
+		case change := <-received:
+			if change.OperationType == OperationInsert && jsonContains(change.FullDocument, marker) {
+				return // recovered and delivered the change written during the outage
+			}
+		case <-deadline:
+			t.Fatal("transport did not resume delivery after mid-stream connectivity loss")
+		}
+	}
+}
+
+// singleHostFromURI extracts a single host:port from a standard mongodb:// URI
+// (e.g. "mongodb://localhost:27018/?directConnection=true"). It returns
+// ok=false for SRV URIs (mongodb+srv://), multi-host seed lists, or URIs
+// missing an explicit port — none of which a single-port proxy can faithfully
+// stand in for.
+func singleHostFromURI(uri string) (string, bool) {
+	if !strings.HasPrefix(uri, "mongodb://") {
+		return "", false // mongodb+srv:// resolves multiple hosts dynamically
+	}
+	rest := strings.TrimPrefix(uri, "mongodb://")
+	// Strip any userinfo@ prefix.
+	if at := strings.LastIndex(rest, "@"); at >= 0 {
+		rest = rest[at+1:]
+	}
+	// Host section ends at the first '/' or '?'.
+	if i := strings.IndexAny(rest, "/?"); i >= 0 {
+		rest = rest[:i]
+	}
+	if rest == "" || strings.Contains(rest, ",") {
+		return "", false // empty or multi-host seed list
+	}
+	host, port, err := net.SplitHostPort(rest)
+	if err != nil || host == "" || port == "" {
+		return "", false
+	}
+	return rest, true
+}
+
+// tcpProxy is a minimal in-process TCP proxy that forwards accepted connections
+// to a fixed upstream address. It tracks live tunnels so a test can sever them
+// all mid-stream to simulate a connectivity blip while continuing to accept new
+// connections (so the client can reconnect).
+type tcpProxy struct {
+	ln       net.Listener
+	upstream string
+
+	mu     sync.Mutex
+	conns  map[net.Conn]struct{}
+	closed bool
+}
+
+// newTCPProxy starts a proxy listening on an ephemeral localhost port that
+// forwards to upstream.
+func newTCPProxy(upstream string) (*tcpProxy, error) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return nil, err
+	}
+	p := &tcpProxy{
+		ln:       ln,
+		upstream: upstream,
+		conns:    make(map[net.Conn]struct{}),
+	}
+	go p.acceptLoop()
+	return p, nil
+}
+
+// Addr returns the proxy's listening address (host:port).
+func (p *tcpProxy) Addr() string { return p.ln.Addr().String() }
+
+func (p *tcpProxy) acceptLoop() {
+	for {
+		downstream, err := p.ln.Accept()
+		if err != nil {
+			return // listener closed
+		}
+		go p.handle(downstream)
+	}
+}
+
+func (p *tcpProxy) handle(downstream net.Conn) {
+	upstream, err := net.DialTimeout("tcp", p.upstream, 10*time.Second)
+	if err != nil {
+		_ = downstream.Close()
+		return
+	}
+
+	p.track(downstream)
+	p.track(upstream)
+
+	done := make(chan struct{}, 2)
+	pipe := func(dst, src net.Conn) {
+		_, _ = ioCopy(dst, src)
+		done <- struct{}{}
+	}
+	go pipe(upstream, downstream)
+	go pipe(downstream, upstream)
+
+	<-done
+	p.untrack(downstream)
+	p.untrack(upstream)
+	_ = downstream.Close()
+	_ = upstream.Close()
+}
+
+func (p *tcpProxy) track(c net.Conn) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		_ = c.Close()
+		return
+	}
+	p.conns[c] = struct{}{}
+}
+
+func (p *tcpProxy) untrack(c net.Conn) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	delete(p.conns, c)
+}
+
+// SeverAll closes every currently-tracked tunnel connection, simulating a
+// mid-stream network drop. The listener stays open so the client can reconnect.
+func (p *tcpProxy) SeverAll() {
+	p.mu.Lock()
+	conns := make([]net.Conn, 0, len(p.conns))
+	for c := range p.conns {
+		conns = append(conns, c)
+	}
+	p.mu.Unlock()
+	for _, c := range conns {
+		_ = c.Close()
+	}
+}
+
+// Close shuts down the proxy listener and all live connections.
+func (p *tcpProxy) Close() {
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return
+	}
+	p.closed = true
+	conns := make([]net.Conn, 0, len(p.conns))
+	for c := range p.conns {
+		conns = append(conns, c)
+	}
+	p.mu.Unlock()
+	_ = p.ln.Close()
+	for _, c := range conns {
+		_ = c.Close()
+	}
+}
+
+// ioCopy copies from src to dst until EOF or error. It is a thin wrapper kept
+// local to avoid importing io at multiple call sites in this test file.
+func ioCopy(dst, src net.Conn) (int64, error) {
+	buf := make([]byte, 32*1024)
+	var total int64
+	for {
+		n, rerr := src.Read(buf)
+		if n > 0 {
+			w, werr := dst.Write(buf[:n])
+			total += int64(w)
+			if werr != nil {
+				return total, werr
+			}
+		}
+		if rerr != nil {
+			return total, rerr
 		}
 	}
 }

@@ -3,7 +3,6 @@ package outbox
 import (
 	"context"
 	"errors"
-	"os"
 	"strconv"
 	"sync"
 	"testing"
@@ -11,49 +10,26 @@ import (
 
 	evtoutbox "github.com/rbaliyan/event/v3/outbox"
 	"go.mongodb.org/mongo-driver/v2/bson"
-	"go.mongodb.org/mongo-driver/v2/mongo"
-	"go.mongodb.org/mongo-driver/v2/mongo/options"
-)
 
-func getMongoURI() string {
-	if uri := os.Getenv("MONGO_URI"); uri != "" {
-		return uri
-	}
-	return "mongodb://localhost:27018/?directConnection=true"
-}
+	"github.com/rbaliyan/event-mongodb/internal/mongotest"
+)
 
 // setupOutboxStore connects to MongoDB and returns a MongoStore backed by a
 // unique per-test database. It skips the test (rather than failing) when no
-// MongoDB instance is reachable. The returned cleanup drops the database.
+// MongoDB instance is reachable. Teardown (a bounded db drop) is registered via
+// t.Cleanup so it runs even if a test panics.
 func setupOutboxStore(t *testing.T) (*MongoStore, func()) {
 	t.Helper()
 
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
+	client := mongotest.Connect(t)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-
-	client, err := mongo.Connect(options.Client().ApplyURI(getMongoURI()))
-	if err != nil {
-		cancel()
-		t.Skipf("MongoDB not available: %v", err)
-	}
-
-	if err := client.Ping(ctx, nil); err != nil {
-		cancel()
-		_ = client.Disconnect(ctx)
-		t.Skipf("MongoDB not available: %v", err)
-	}
-
-	dbName := "test_outbox_" + time.Now().Format("20060102150405.000000")
-	db := client.Database(dbName)
+	db := client.Database(mongotest.UniqueDBName("test_outbox"))
 
 	store, err := NewMongoStore(db)
 	if err != nil {
-		cancel()
-		_ = db.Drop(ctx)
-		_ = client.Disconnect(ctx)
+		dropCtx, dropCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		_ = db.Drop(dropCtx)
+		dropCancel()
 		t.Fatalf("NewMongoStore: %v", err)
 	}
 
@@ -61,9 +37,8 @@ func setupOutboxStore(t *testing.T) (*MongoStore, func()) {
 		dropCtx, dropCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer dropCancel()
 		_ = db.Drop(dropCtx)
-		_ = client.Disconnect(dropCtx)
-		cancel()
 	}
+	t.Cleanup(cleanup)
 
 	return store, cleanup
 }
@@ -82,8 +57,7 @@ func insertPending(t *testing.T, ctx context.Context, store *MongoStore, eventID
 }
 
 func TestIntegrationInsertAndGetPending(t *testing.T) {
-	store, cleanup := setupOutboxStore(t)
-	defer cleanup()
+	store, _ := setupOutboxStore(t)
 	ctx := context.Background()
 
 	insertPending(t, ctx, store, "evt-1", 0)
@@ -121,8 +95,7 @@ func TestIntegrationInsertAndGetPending(t *testing.T) {
 }
 
 func TestIntegrationClaimBatchConcurrencySafe(t *testing.T) {
-	store, cleanup := setupOutboxStore(t)
-	defer cleanup()
+	store, _ := setupOutboxStore(t)
 	ctx := context.Background()
 
 	insertPending(t, ctx, store, "evt-1", 0)
@@ -148,8 +121,7 @@ func TestIntegrationClaimBatchConcurrencySafe(t *testing.T) {
 }
 
 func TestIntegrationConcurrentClaimNoDuplicates(t *testing.T) {
-	store, cleanup := setupOutboxStore(t)
-	defer cleanup()
+	store, _ := setupOutboxStore(t)
 	ctx := context.Background()
 
 	const total = 20
@@ -194,8 +166,7 @@ func TestIntegrationConcurrentClaimNoDuplicates(t *testing.T) {
 }
 
 func TestIntegrationMarkPublished(t *testing.T) {
-	store, cleanup := setupOutboxStore(t)
-	defer cleanup()
+	store, _ := setupOutboxStore(t)
 	ctx := context.Background()
 
 	insertPending(t, ctx, store, "evt-1", 0)
@@ -221,8 +192,7 @@ func TestIntegrationMarkPublished(t *testing.T) {
 }
 
 func TestIntegrationMarkFailed(t *testing.T) {
-	store, cleanup := setupOutboxStore(t)
-	defer cleanup()
+	store, _ := setupOutboxStore(t)
 	ctx := context.Background()
 
 	insertPending(t, ctx, store, "evt-1", 0)
@@ -257,8 +227,7 @@ func TestIntegrationMarkFailed(t *testing.T) {
 }
 
 func TestIntegrationCountByStatus(t *testing.T) {
-	store, cleanup := setupOutboxStore(t)
-	defer cleanup()
+	store, _ := setupOutboxStore(t)
 	ctx := context.Background()
 
 	insertPending(t, ctx, store, "evt-1", 0)
@@ -274,8 +243,7 @@ func TestIntegrationCountByStatus(t *testing.T) {
 }
 
 func TestIntegrationRecoverStuck(t *testing.T) {
-	store, cleanup := setupOutboxStore(t)
-	defer cleanup()
+	store, _ := setupOutboxStore(t)
 	ctx := context.Background()
 
 	// Insert a message stuck in processing with an old claimed_at.
@@ -325,8 +293,7 @@ func TestIntegrationRecoverStuck(t *testing.T) {
 }
 
 func TestIntegrationRetryFailed(t *testing.T) {
-	store, cleanup := setupOutboxStore(t)
-	defer cleanup()
+	store, _ := setupOutboxStore(t)
 	ctx := context.Background()
 
 	// One failed message below the retry limit, one at/above it.
@@ -369,8 +336,7 @@ func TestIntegrationRetryFailed(t *testing.T) {
 }
 
 func TestIntegrationDeleteOldPublished(t *testing.T) {
-	store, cleanup := setupOutboxStore(t)
-	defer cleanup()
+	store, _ := setupOutboxStore(t)
 	ctx := context.Background()
 
 	oldTime := time.Now().Add(-48 * time.Hour)
@@ -412,8 +378,7 @@ func TestIntegrationDeleteOldPublished(t *testing.T) {
 }
 
 func TestIntegrationEnsureIndexes(t *testing.T) {
-	store, cleanup := setupOutboxStore(t)
-	defer cleanup()
+	store, _ := setupOutboxStore(t)
 	ctx := context.Background()
 
 	if err := store.EnsureIndexes(ctx); err != nil {
@@ -441,8 +406,7 @@ func TestIntegrationEnsureIndexes(t *testing.T) {
 }
 
 func TestIntegrationIsCappedFalse(t *testing.T) {
-	store, cleanup := setupOutboxStore(t)
-	defer cleanup()
+	store, _ := setupOutboxStore(t)
 	ctx := context.Background()
 
 	// Create the collection via a normal insert.
