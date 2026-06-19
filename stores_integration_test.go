@@ -3,48 +3,28 @@ package mongodb
 import (
 	"context"
 	"fmt"
-	"os"
 	"testing"
 	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
-	"go.mongodb.org/mongo-driver/v2/mongo/options"
+
+	"github.com/rbaliyan/event-mongodb/internal/mongotest"
 )
 
 // setupAckIntegrationTest connects to MongoDB (no replica-set requirement) and
 // returns a per-test database. Tests are skipped when MongoDB is unavailable
-// or when -short is set.
+// or when -short is set. Teardown is registered via t.Cleanup so it runs even
+// if a test panics.
 func setupAckIntegrationTest(t *testing.T) (*mongo.Database, func()) {
 	t.Helper()
 
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
+	client := mongotest.Connect(t)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	db := client.Database(mongotest.UniqueDBName("test_event_mongodb_ack"))
 
-	uri := getMongoURI()
-	client, err := mongo.Connect(options.Client().ApplyURI(uri))
-	if err != nil {
-		cancel()
-		t.Skipf("MongoDB not available: %v", err)
-	}
-	if err := client.Ping(ctx, nil); err != nil {
-		cancel()
-		_ = client.Disconnect(ctx)
-		t.Skipf("MongoDB not available: %v", err)
-	}
-
-	dbName := fmt.Sprintf("test_event_mongodb_ack_%d_%s",
-		os.Getpid(), time.Now().Format("20060102150405"))
-	db := client.Database(dbName)
-
-	cleanup := func() {
-		_ = db.Drop(context.Background())
-		_ = client.Disconnect(context.Background())
-		cancel()
-	}
+	cleanup := func() { _ = db.Drop(context.Background()) }
+	t.Cleanup(cleanup)
 
 	return db, cleanup
 }
@@ -72,8 +52,7 @@ func newAckStoreForTest(t *testing.T, db *mongo.Database, ttl time.Duration) *Mo
 // TestIntegration_AckStore_PendingCount_StoreAck exercises the full Store→Ack
 // lifecycle and confirms the in-memory counter mirrors collection state.
 func TestIntegration_AckStore_PendingCount_StoreAck(t *testing.T) {
-	db, cleanup := setupAckIntegrationTest(t)
-	defer cleanup()
+	db, _ := setupAckIntegrationTest(t)
 
 	store := newAckStoreForTest(t, db, time.Hour)
 	ctx := context.Background()
@@ -117,8 +96,7 @@ func TestIntegration_AckStore_PendingCount_StoreAck(t *testing.T) {
 // call for an already-stored event is a no-op for the counter, matching the
 // duplicate-key behavior of the underlying InsertOne.
 func TestIntegration_AckStore_PendingCount_DuplicateStore(t *testing.T) {
-	db, cleanup := setupAckIntegrationTest(t)
-	defer cleanup()
+	db, _ := setupAckIntegrationTest(t)
 
 	store := newAckStoreForTest(t, db, time.Hour)
 	ctx := context.Background()
@@ -139,8 +117,7 @@ func TestIntegration_AckStore_PendingCount_DuplicateStore(t *testing.T) {
 // idempotent at the document level (filter requires acked_at == epoch) so a
 // re-ack is a silent no-op.
 func TestIntegration_AckStore_PendingCount_AckIdempotent(t *testing.T) {
-	db, cleanup := setupAckIntegrationTest(t)
-	defer cleanup()
+	db, _ := setupAckIntegrationTest(t)
 
 	store := newAckStoreForTest(t, db, time.Hour)
 	ctx := context.Background()
@@ -167,8 +144,7 @@ func TestIntegration_AckStore_PendingCount_AckIdempotent(t *testing.T) {
 // Count query. Without the partial index the query falls back to a full
 // collection scan, which is the regression this PR addresses.
 func TestIntegration_AckStore_PendingPartialIndex_ServesCount(t *testing.T) {
-	db, cleanup := setupAckIntegrationTest(t)
-	defer cleanup()
+	db, _ := setupAckIntegrationTest(t)
 
 	store := newAckStoreForTest(t, db, time.Hour)
 	ctx := context.Background()
@@ -201,23 +177,41 @@ func TestIntegration_AckStore_PendingPartialIndex_ServesCount(t *testing.T) {
 	}
 
 	if findIndexScan(result) == "" {
-		t.Errorf("expected pending Count to be served by an IXSCAN, got plan: %v", result["queryPlanner"])
+		t.Errorf("expected pending Count to be served by an index-backed plan (IXSCAN or COUNT_SCAN), got plan: %v", result["queryPlanner"])
 	}
 }
 
 // findIndexScan walks an explain result and returns the indexName of the first
-// IXSCAN stage encountered, or "" if no IXSCAN appears in the plan. Walks both
+// index-backed stage encountered, or "" if the plan is not index-backed. A
+// covered pending count is served by a COUNT -> COUNT_SCAN plan over the
+// partial index rather than an IXSCAN, so any stage that carries an indexName
+// (IXSCAN, COUNT_SCAN, DISTINCT_SCAN, ...) counts as index-served. Walks both
 // queryPlanner.winningPlan and any nested rejectedPlans/inputStage trees.
 func findIndexScan(v any) string {
 	switch m := v.(type) {
 	case bson.M:
-		if stage, _ := m["stage"].(string); stage == "IXSCAN" {
-			if name, _ := m["indexName"].(string); name != "" {
-				return name
-			}
+		// Any stage carrying a non-empty indexName is index-backed. This covers
+		// IXSCAN as well as COUNT_SCAN (the covered-count plan over the partial
+		// index) without requiring a specific literal stage name.
+		if name, _ := m["indexName"].(string); name != "" {
+			return name
 		}
 		for _, child := range m {
 			if name := findIndexScan(child); name != "" {
+				return name
+			}
+		}
+	case bson.D:
+		// Decoding an explain result into bson.M yields bson.D for nested
+		// documents (interface values default to bson.D), so the walk must
+		// handle bson.D too or it stops before reaching the nested COUNT_SCAN.
+		for _, e := range m {
+			if e.Key == "indexName" {
+				if name, _ := e.Value.(string); name != "" {
+					return name
+				}
+			}
+			if name := findIndexScan(e.Value); name != "" {
 				return name
 			}
 		}

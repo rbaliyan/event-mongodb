@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("{\"operation_type\":\"delete\",\"document_key\":\"507f1f77bcf86cd799439011\"}")

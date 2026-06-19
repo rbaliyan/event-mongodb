@@ -1,0 +1,91 @@
+# libFuzzer dictionary for event-mongodb byte-oriented fuzz targets.
+# Improves structure-aware mutation of BSON-encoded and JSON-encoded inputs.
+# Format: https://llvm.org/docs/LibFuzzer.html#dictionaries
+
+#
+# --- BSON element type bytes (first byte of an element identifies its type) ---
+# See https://bsonspec.org/spec.html
+#
+bson_double="\x01"
+bson_string="\x02"
+bson_document="\x03"
+bson_array="\x04"
+bson_binary="\x05"
+bson_objectid="\x07"
+bson_bool="\x08"
+bson_datetime="\x09"
+bson_null="\x0a"
+bson_regex="\x0b"
+bson_int32="\x10"
+bson_timestamp="\x11"
+bson_int64="\x12"
+bson_decimal128="\x13"
+
+# Minimal valid empty BSON document (length prefix + terminator).
+bson_empty_doc="\x05\x00\x00\x00\x00"
+# Element terminator / cstring NUL.
+bson_nul="\x00"
+
+#
+# --- Codec envelope field names (codec/payload BSON message wire format) ---
+#
+env_id="id"
+env_source="source"
+env_payload="payload"
+env_metadata="metadata"
+env_timestamp="timestamp"
+env_retry="retry"
+
+#
+# --- Change-stream schema field names ---
+# https://www.mongodb.com/docs/manual/reference/change-events/
+#
+cs_operation_type="operationType"
+cs_ns="ns"
+cs_db="db"
+cs_coll="coll"
+cs_full_document="fullDocument"
+cs_document_key="documentKey"
+cs_update_description="updateDescription"
+cs_updated_fields="updatedFields"
+cs_removed_fields="removedFields"
+cs_truncated_arrays="truncatedArrays"
+cs_cluster_time="clusterTime"
+cs_id="_id"
+cs_data="_data"
+
+# ChangeEvent JSON tags (root FuzzChangeEventJSON target).
+ce_operation_type="operation_type"
+ce_full_document="full_document"
+ce_update_description="update_description"
+ce_updated_fields="updated_fields"
+ce_removed_fields="removed_fields"
+ce_namespace="namespace"
+
+# Operation type values.
+op_insert="insert"
+op_update="update"
+op_replace="replace"
+op_delete="delete"
+
+# Extended-JSON special-type markers emitted/consumed by the converter.
+ej_oid="$oid"
+ej_binary="$binary"
+ej_base64="base64"
+ej_subtype="subType"
+
+#
+# --- JSON structural tokens ---
+#
+json_obj_open="{"
+json_obj_close="}"
+json_arr_open="["
+json_arr_close="]"
+json_colon=":"
+json_comma=","
+json_quote="\""
+json_true="true"
+json_false="false"
+json_null="null"
+json_empty_obj="{}"
+json_empty_arr="[]"

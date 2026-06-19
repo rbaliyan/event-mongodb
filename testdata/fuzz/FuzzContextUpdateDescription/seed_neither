@@ -1,0 +1,4 @@
+go test fuzz v1
+string("{\"ignored\":true}")
+string("[\"ignored\"]")
+byte('\x00')

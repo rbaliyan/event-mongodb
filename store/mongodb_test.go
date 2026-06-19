@@ -1,6 +1,8 @@
 package store
 
 import (
+	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -87,6 +89,39 @@ func TestWithMongoCreatedAtField(t *testing.T) {
 		s := NewMongoStore[testDoc](nil, WithMongoCreatedAtField[testDoc](""))
 		if s.createdAtField != "created_at" {
 			t.Errorf("createdAtField = %q, want %q (default kept)", s.createdAtField, "created_at")
+		}
+	})
+}
+
+func TestEmptyIDGuards(t *testing.T) {
+	// These guards short-circuit with ErrInvalidID before touching the
+	// collection, so a nil collection is safe here.
+	ctx := context.Background()
+	s := NewMongoStore[testDoc](nil)
+	empty := testDoc{} // GetID() == ""
+
+	t.Run("Create rejects empty id", func(t *testing.T) {
+		if err := s.Create(ctx, empty); !errors.Is(err, evtstore.ErrInvalidID) {
+			t.Errorf("Create err = %v, want ErrInvalidID", err)
+		}
+	})
+
+	t.Run("Get rejects empty id", func(t *testing.T) {
+		_, err := s.Get(ctx, "")
+		if !errors.Is(err, evtstore.ErrInvalidID) {
+			t.Errorf("Get err = %v, want ErrInvalidID", err)
+		}
+	})
+
+	t.Run("Update rejects empty id", func(t *testing.T) {
+		if err := s.Update(ctx, empty); !errors.Is(err, evtstore.ErrInvalidID) {
+			t.Errorf("Update err = %v, want ErrInvalidID", err)
+		}
+	})
+
+	t.Run("Upsert rejects empty id", func(t *testing.T) {
+		if err := s.Upsert(ctx, empty); !errors.Is(err, evtstore.ErrInvalidID) {
+			t.Errorf("Upsert err = %v, want ErrInvalidID", err)
 		}
 	})
 }

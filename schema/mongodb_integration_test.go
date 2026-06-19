@@ -3,73 +3,42 @@ package schema
 import (
 	"context"
 	"errors"
-	"fmt"
-	"os"
 	"testing"
 	"time"
 
-	"go.mongodb.org/mongo-driver/v2/mongo"
-	"go.mongodb.org/mongo-driver/v2/mongo/options"
-
 	evtschema "github.com/rbaliyan/event/v3/schema"
-)
 
-func getMongoURI() string {
-	if uri := os.Getenv("MONGO_URI"); uri != "" {
-		return uri
-	}
-	return "mongodb://localhost:27018/?directConnection=true"
-}
+	"github.com/rbaliyan/event-mongodb/internal/mongotest"
+)
 
 // setupSchemaIntegrationTest connects to MongoDB and returns a MongoProvider
 // over a unique per-test database. Tests skip when MongoDB is unavailable or
-// when -short is set. The returned cleanup closes the provider and drops the db.
+// when -short is set. Teardown (provider close + db drop) is registered via
+// t.Cleanup so it runs even if a test panics.
 func setupSchemaIntegrationTest(t *testing.T, publisher func(context.Context, evtschema.SchemaChangeEvent) error) (*MongoProvider, func()) {
 	t.Helper()
 
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
+	client := mongotest.Connect(t)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-
-	uri := getMongoURI()
-	client, err := mongo.Connect(options.Client().ApplyURI(uri))
-	if err != nil {
-		cancel()
-		t.Skipf("MongoDB not available: %v", err)
-	}
-	if err := client.Ping(ctx, nil); err != nil {
-		cancel()
-		_ = client.Disconnect(ctx)
-		t.Skipf("MongoDB not available: %v", err)
-	}
-
-	dbName := fmt.Sprintf("test_event_mongodb_schema_%d_%s",
-		os.Getpid(), time.Now().Format("20060102150405.000000"))
-	db := client.Database(dbName)
+	db := client.Database(mongotest.UniqueDBName("test_event_mongodb_schema"))
 
 	p, err := NewMongoProvider(db, publisher)
 	if err != nil {
-		cancel()
 		_ = db.Drop(context.Background())
-		_ = client.Disconnect(context.Background())
 		t.Fatalf("NewMongoProvider: %v", err)
 	}
 
 	cleanup := func() {
 		_ = p.Close()
 		_ = db.Drop(context.Background())
-		_ = client.Disconnect(context.Background())
-		cancel()
 	}
+	t.Cleanup(cleanup)
 
 	return p, cleanup
 }
 
 func TestIntegrationSetGetDelete(t *testing.T) {
-	p, cleanup := setupSchemaIntegrationTest(t, nil)
-	defer cleanup()
+	p, _ := setupSchemaIntegrationTest(t, nil)
 
 	ctx := context.Background()
 
@@ -122,8 +91,7 @@ func TestIntegrationSetGetDelete(t *testing.T) {
 }
 
 func TestIntegrationSetVersionDowngrade(t *testing.T) {
-	p, cleanup := setupSchemaIntegrationTest(t, nil)
-	defer cleanup()
+	p, _ := setupSchemaIntegrationTest(t, nil)
 
 	ctx := context.Background()
 
@@ -147,8 +115,7 @@ func TestIntegrationSetVersionDowngrade(t *testing.T) {
 }
 
 func TestIntegrationSetPreservesCreatedAt(t *testing.T) {
-	p, cleanup := setupSchemaIntegrationTest(t, nil)
-	defer cleanup()
+	p, _ := setupSchemaIntegrationTest(t, nil)
 
 	ctx := context.Background()
 
@@ -179,8 +146,7 @@ func TestIntegrationSetPreservesCreatedAt(t *testing.T) {
 }
 
 func TestIntegrationList(t *testing.T) {
-	p, cleanup := setupSchemaIntegrationTest(t, nil)
-	defer cleanup()
+	p, _ := setupSchemaIntegrationTest(t, nil)
 
 	ctx := context.Background()
 
@@ -223,8 +189,7 @@ func TestIntegrationPublisherInvokedOnSet(t *testing.T) {
 		return nil
 	}
 
-	p, cleanup := setupSchemaIntegrationTest(t, publisher)
-	defer cleanup()
+	p, _ := setupSchemaIntegrationTest(t, publisher)
 
 	ctx := context.Background()
 	if err := p.Set(ctx, &evtschema.EventSchema{Name: "evt", Version: 2}); err != nil {
@@ -240,8 +205,7 @@ func TestIntegrationPublisherInvokedOnSet(t *testing.T) {
 }
 
 func TestIntegrationWatchReceivesChange(t *testing.T) {
-	p, cleanup := setupSchemaIntegrationTest(t, nil)
-	defer cleanup()
+	p, _ := setupSchemaIntegrationTest(t, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -285,8 +249,7 @@ func TestIntegrationWatchReceivesChange(t *testing.T) {
 }
 
 func TestIntegrationEnsureIndexes(t *testing.T) {
-	p, cleanup := setupSchemaIntegrationTest(t, nil)
-	defer cleanup()
+	p, _ := setupSchemaIntegrationTest(t, nil)
 
 	if err := p.EnsureIndexes(context.Background()); err != nil {
 		t.Fatalf("EnsureIndexes: %v", err)

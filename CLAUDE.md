@@ -304,12 +304,56 @@ atomic.LoadInt32(&t.status) == 1             // IsOpen
 
 ## Testing
 
-Metrics tests use `sdkmetric.NewManualReader()` for deterministic reads — no external services needed.
-Integration tests (transport, stores) require a MongoDB replica set. Run with:
+The suite has five layers; CI runs each in a dedicated job (`.github/workflows/ci.yml`).
 
-```bash
-go test -v ./...
-```
+| Layer | How to run | MongoDB needed? |
+|-------|------------|-----------------|
+| Smoke | `just smoke` (build + `go test -short` + examples) | No |
+| Unit | `go test -short -race ./...` | No |
+| Integration | `just test-integration` (spins up a replica set) | Yes (replica set) |
+| Benchmarks | `just bench` / `just bench-compare main` | No (pure hot paths) |
+| Fuzz | `just fuzz <Target> <pkg> <dur>`; ClusterFuzzLite in CI | No |
+
+- Unit/smoke tests are hermetic: integration tests gate on `testing.Short()` and on a MongoDB ping (`getMongoURI` → connect → `t.Skipf` when unavailable), so `go test -short ./...` needs no services.
+- Metrics tests use `sdkmetric.NewManualReader()` for deterministic reads.
+- Integration tests require a MongoDB replica set (change streams + transactions). The CI `integration` job starts `mongo:6.0 --replSet rs0`, sets `MONGO_URI`, runs the full suite with `-race`, and enforces a coverage floor.
+
+### Benchmarks
+
+Benchmarks live in `*_bench_test.go` / `bench_test.go` files and cover the per-event hot paths (BSON→JSON conversion, change-event extraction, payload/metadata building, codec round-trips, the `Field[T]` accessor, and store query builders). All use `b.ReportAllocs()` and `b.Run` sub-benchmarks. The CI `bench` job runs them and posts a `benchstat` base-vs-HEAD comparison to the job summary.
+
+### Fuzzing
+
+Native Go fuzz targets live in `fuzz_test.go` files; targets are registered for ClusterFuzzLite in `.clusterfuzzlite/build.sh`. Targets cover the untrusted-input boundary and use real oracles (decode→encode→decode round-trip fixpoints, cross-type coercion agreement, JSON-validity of converted output) rather than don't-panic only. The byte-oriented targets feed RAW bytes through the production driver decoder (`bson.Unmarshal`) so the real parser — not a JSON re-encode — is exercised. Seed corpora are committed under `testdata/fuzz/<Target>/` (real change-stream-shaped insert/update/replace/delete documents, docs with ObjectID/Decimal128/Binary/DateTime/Timestamp, and deeply nested / array-heavy shapes; codec/payload seeds are produced by their real `Encode`). CI runs ClusterFuzzLite in `code-change` mode per PR (`cflite_pr.yml`) and a weekly hour-long ASan batch (`cflite_batch.yml`).
+
+**Targets and packages:**
+
+| Target | Package | What it fuzzes |
+|--------|---------|----------------|
+| `FuzzFormatDocumentKey` | `.` (root) | `formatDocumentKey` over arbitrary `_id` strings |
+| `FuzzBsonDToJSON` | `.` (root) | raw bytes → `bson.Unmarshal` → `bsonDToJSON`; oracle: output is valid JSON |
+| `FuzzConvertBSONTypes` | `.` (root) | raw bytes → `bson.Unmarshal` → `convertBSONTypes`; oracle: output is JSON-encodable |
+| `FuzzChangeEventJSON` | `.` (root) | JSON → `ChangeEvent` unmarshal (JSON by design) |
+| `FuzzConvertBSOND` | `.` (root) | hand-built `bson.D` with special types → `bsonDToJSON` |
+| `FuzzFieldCoerce` | `.` (root) | `Field[T]` / `coerceNumeric` cross-type agreement |
+| `FuzzContextUpdateDescription` | `.` (root) | metadata JSON → `ContextUpdateDescription`; oracle: nil-iff-no-keys, internal consistency |
+| `FuzzFullDocumentUnmarshal` | `.` (root) | raw bytes as `bson.Raw` FullDocument → production decode path |
+| `FuzzDecodeMongoCursor` | `monitor` | `decodeMongoCursor` round-trip stability |
+| `FuzzWorkerCursor` | `distributed` | `decodeWorkerCursor` round-trip stability |
+| `FuzzBSONCodecDecode` / `FuzzBSONCodecRoundTrip` | `codec` | message envelope BSON decode / round-trip |
+| `FuzzPayloadBSONDecode` / `FuzzPayloadBSONRoundTrip` | `payload` | payload BSON decode / round-trip |
+
+**Dictionary:** `.clusterfuzzlite/fuzz.dict` is a libFuzzer dictionary of BSON element type bytes, the codec envelope field names (`id`, `source`, `payload`, `metadata`, `timestamp`, `retry`), the change-stream schema tokens (`operationType`, `ns`, `fullDocument`, `updateDescription`, `updatedFields`, `removedFields`, `_id`, …), and JSON structural tokens. `build.sh` copies it into `$OUT` and writes per-fuzzer `$OUT/<name>.dict` + `$OUT/<name>.options` (`[libfuzzer]\ndict = <name>.dict`) for the byte-oriented targets only (scalar-argument targets like `FuzzFieldCoerce` are deliberately omitted). This is the OSS-Fuzz/ClusterFuzzLite convention for structure-aware mutation.
+
+**Crash → regression-seed triage loop:**
+1. A ClusterFuzzLite run surfaces a crash as a SARIF alert (PR Security tab) or a build artifact containing the reproducer testcase.
+2. Reproduce locally with an **anchored** run: `go test -run='^$' -fuzz='^Name$' <pkg>` (e.g. `go test -run='^$' -fuzz='^FuzzWorkerCursor$' ./distributed/`). When `go test` finds a failing input it writes it to `testdata/fuzz/<Target>/<hash>`.
+3. Commit that failing input under `testdata/fuzz/<Target>/` as a **permanent regression seed** — it then replays on every `go test -run=Fuzz` and guards against reintroduction.
+4. Fix the code; the committed seed turns the crash into a standing regression test.
+
+**Anchored-pattern caveat:** always anchor the `-fuzz` pattern with `^…$`. The pattern is a regexp matched against target names, so an unanchored `-fuzz=FuzzBsonDToJSON` would also match any future target whose name *contains* `FuzzBsonDToJSON` (it is a prefix of such names), running more than intended. Use `-fuzz='^FuzzBsonDToJSON$'`. The same applies to `-run`; pair `-run='^$'` with `-fuzz` so only the fuzz engine runs and unit tests are skipped.
+
+**Rule:** new code that parses or decodes untrusted input must ship a corresponding fuzz target registered in `build.sh` with a unique `fuzz_*` binary name, plus committed seeds under `testdata/fuzz/<Target>/`.
 
 ## Limitations
 

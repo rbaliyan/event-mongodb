@@ -4,59 +4,30 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"testing"
 	"time"
 
-	"go.mongodb.org/mongo-driver/v2/mongo"
-	"go.mongodb.org/mongo-driver/v2/mongo/options"
-
 	evtstore "github.com/rbaliyan/event/v3/store"
-)
 
-func getMongoURI() string {
-	if uri := os.Getenv("MONGO_URI"); uri != "" {
-		return uri
-	}
-	return "mongodb://localhost:27018/?directConnection=true"
-}
+	"github.com/rbaliyan/event-mongodb/internal/mongotest"
+)
 
 // setupStoreIntegrationTest connects to MongoDB and returns a per-test
 // MongoStore over a unique database. Tests are skipped when MongoDB is
-// unavailable or when -short is set.
+// unavailable or when -short is set. Teardown is registered via t.Cleanup so it
+// runs even if a test panics.
 func setupStoreIntegrationTest(t *testing.T) (*MongoStore[testDoc], func()) {
 	t.Helper()
 
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
+	client := mongotest.Connect(t)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-
-	uri := getMongoURI()
-	client, err := mongo.Connect(options.Client().ApplyURI(uri))
-	if err != nil {
-		cancel()
-		t.Skipf("MongoDB not available: %v", err)
-	}
-	if err := client.Ping(ctx, nil); err != nil {
-		cancel()
-		_ = client.Disconnect(ctx)
-		t.Skipf("MongoDB not available: %v", err)
-	}
-
-	dbName := fmt.Sprintf("test_event_mongodb_store_%d_%s",
-		os.Getpid(), time.Now().Format("20060102150405"))
-	db := client.Database(dbName)
+	db := client.Database(mongotest.UniqueDBName("test_event_mongodb_store"))
 	coll := db.Collection("docs")
 
 	store := NewMongoStore[testDoc](coll)
 
-	cleanup := func() {
-		_ = db.Drop(context.Background())
-		_ = client.Disconnect(context.Background())
-		cancel()
-	}
+	cleanup := func() { _ = db.Drop(context.Background()) }
+	t.Cleanup(cleanup)
 
 	return store, cleanup
 }
@@ -66,8 +37,7 @@ func newDoc(id string, createdAt time.Time, name string) testDoc {
 }
 
 func TestIntegrationCreateAndGet(t *testing.T) {
-	s, cleanup := setupStoreIntegrationTest(t)
-	defer cleanup()
+	s, _ := setupStoreIntegrationTest(t)
 	ctx := context.Background()
 
 	doc := newDoc("id-1", time.Now(), "alice")
@@ -88,8 +58,7 @@ func TestIntegrationCreateAndGet(t *testing.T) {
 }
 
 func TestIntegrationCreateEmptyID(t *testing.T) {
-	s, cleanup := setupStoreIntegrationTest(t)
-	defer cleanup()
+	s, _ := setupStoreIntegrationTest(t)
 	ctx := context.Background()
 
 	err := s.Create(ctx, newDoc("", time.Now(), "noid"))
@@ -99,8 +68,7 @@ func TestIntegrationCreateEmptyID(t *testing.T) {
 }
 
 func TestIntegrationCreateDuplicate(t *testing.T) {
-	s, cleanup := setupStoreIntegrationTest(t)
-	defer cleanup()
+	s, _ := setupStoreIntegrationTest(t)
 	ctx := context.Background()
 
 	doc := newDoc("dup", time.Now(), "first")
@@ -115,8 +83,7 @@ func TestIntegrationCreateDuplicate(t *testing.T) {
 }
 
 func TestIntegrationGetMissing(t *testing.T) {
-	s, cleanup := setupStoreIntegrationTest(t)
-	defer cleanup()
+	s, _ := setupStoreIntegrationTest(t)
 	ctx := context.Background()
 
 	_, err := s.Get(ctx, "missing")
@@ -131,8 +98,7 @@ func TestIntegrationGetMissing(t *testing.T) {
 }
 
 func TestIntegrationUpdate(t *testing.T) {
-	s, cleanup := setupStoreIntegrationTest(t)
-	defer cleanup()
+	s, _ := setupStoreIntegrationTest(t)
 	ctx := context.Background()
 
 	t.Run("missing yields ErrNotFound", func(t *testing.T) {
@@ -171,8 +137,7 @@ func TestIntegrationUpdate(t *testing.T) {
 }
 
 func TestIntegrationDelete(t *testing.T) {
-	s, cleanup := setupStoreIntegrationTest(t)
-	defer cleanup()
+	s, _ := setupStoreIntegrationTest(t)
 	ctx := context.Background()
 
 	doc := newDoc("del", time.Now(), "x")
@@ -193,8 +158,7 @@ func TestIntegrationDelete(t *testing.T) {
 }
 
 func TestIntegrationUpsert(t *testing.T) {
-	s, cleanup := setupStoreIntegrationTest(t)
-	defer cleanup()
+	s, _ := setupStoreIntegrationTest(t)
 	ctx := context.Background()
 
 	t.Run("empty ID yields ErrInvalidID", func(t *testing.T) {
@@ -231,8 +195,7 @@ func TestIntegrationUpsert(t *testing.T) {
 }
 
 func TestIntegrationListPagination(t *testing.T) {
-	s, cleanup := setupStoreIntegrationTest(t)
-	defer cleanup()
+	s, _ := setupStoreIntegrationTest(t)
 	ctx := context.Background()
 
 	base := time.Now().Truncate(time.Second)
@@ -279,8 +242,7 @@ func TestIntegrationListPagination(t *testing.T) {
 }
 
 func TestIntegrationListDescendingAndTimeFilter(t *testing.T) {
-	s, cleanup := setupStoreIntegrationTest(t)
-	defer cleanup()
+	s, _ := setupStoreIntegrationTest(t)
 	ctx := context.Background()
 
 	base := time.Now().Truncate(time.Second)
@@ -318,8 +280,7 @@ func TestIntegrationListDescendingAndTimeFilter(t *testing.T) {
 }
 
 func TestIntegrationCount(t *testing.T) {
-	s, cleanup := setupStoreIntegrationTest(t)
-	defer cleanup()
+	s, _ := setupStoreIntegrationTest(t)
 	ctx := context.Background()
 
 	base := time.Now().Truncate(time.Second)
@@ -347,8 +308,7 @@ func TestIntegrationCount(t *testing.T) {
 }
 
 func TestIntegrationDeleteOlderThan(t *testing.T) {
-	s, cleanup := setupStoreIntegrationTest(t)
-	defer cleanup()
+	s, _ := setupStoreIntegrationTest(t)
 	ctx := context.Background()
 
 	now := time.Now()
@@ -378,8 +338,7 @@ func TestIntegrationDeleteOlderThan(t *testing.T) {
 }
 
 func TestIntegrationEnsureIndexes(t *testing.T) {
-	s, cleanup := setupStoreIntegrationTest(t)
-	defer cleanup()
+	s, _ := setupStoreIntegrationTest(t)
 	ctx := context.Background()
 
 	if err := s.EnsureIndexes(ctx); err != nil {

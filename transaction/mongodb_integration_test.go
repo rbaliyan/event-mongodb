@@ -3,60 +3,31 @@ package transaction
 import (
 	"context"
 	"errors"
-	"fmt"
-	"os"
 	"strings"
 	"testing"
-	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
-	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
 	evttransaction "github.com/rbaliyan/event/v3/transaction"
-)
 
-func getMongoURI() string {
-	if uri := os.Getenv("MONGO_URI"); uri != "" {
-		return uri
-	}
-	return "mongodb://localhost:27018/?directConnection=true"
-}
+	"github.com/rbaliyan/event-mongodb/internal/mongotest"
+)
 
 // setupTxIntegrationTest connects to MongoDB and returns a client plus a
 // per-test collection over a unique database. Tests are skipped when MongoDB
-// is unavailable or when -short is set.
+// is unavailable or when -short is set. Teardown is registered via t.Cleanup so
+// it runs even if a test panics.
 func setupTxIntegrationTest(t *testing.T) (*mongo.Client, *mongo.Collection, func()) {
 	t.Helper()
 
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
+	client := mongotest.Connect(t)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-
-	uri := getMongoURI()
-	client, err := mongo.Connect(options.Client().ApplyURI(uri))
-	if err != nil {
-		cancel()
-		t.Skipf("MongoDB not available: %v", err)
-	}
-	if err := client.Ping(ctx, nil); err != nil {
-		cancel()
-		_ = client.Disconnect(ctx)
-		t.Skipf("MongoDB not available: %v", err)
-	}
-
-	dbName := fmt.Sprintf("test_event_mongodb_tx_%d_%s",
-		os.Getpid(), time.Now().Format("20060102150405.000000"))
-	db := client.Database(dbName)
+	db := client.Database(mongotest.UniqueDBName("test_event_mongodb_tx"))
 	coll := db.Collection("docs")
 
-	cleanup := func() {
-		_ = db.Drop(context.Background())
-		_ = client.Disconnect(context.Background())
-		cancel()
-	}
+	cleanup := func() { _ = db.Drop(context.Background()) }
+	t.Cleanup(cleanup)
 
 	return client, coll, cleanup
 }
@@ -89,14 +60,13 @@ func countByID(t *testing.T, coll *mongo.Collection, id string) int64 {
 	return n
 }
 
-// TestMongoTransaction_RollbackOmitsDocument is the key test requested by the
-// design review: a document inserted via tx.Context() must NOT survive a
+// TestIntegration_Transaction_RollbackOmitsDocument is the key test requested
+// by the design review: a document inserted via tx.Context() must NOT survive a
 // Rollback. This proves the session is correctly bound into the context by
 // Begin (mongo.NewSessionContext), so the write joins the transaction instead
 // of auto-committing.
-func TestMongoTransaction_RollbackOmitsDocument(t *testing.T) {
-	client, coll, cleanup := setupTxIntegrationTest(t)
-	defer cleanup()
+func TestIntegration_Transaction_RollbackOmitsDocument(t *testing.T) {
+	client, coll, _ := setupTxIntegrationTest(t)
 
 	mgr, err := NewMongoManager(client)
 	if err != nil {
@@ -140,11 +110,10 @@ func TestMongoTransaction_RollbackOmitsDocument(t *testing.T) {
 	}
 }
 
-// TestMongoTransaction_CommitPersistsDocument is the commit counterpart: a
-// document inserted via tx.Context() must survive a Commit.
-func TestMongoTransaction_CommitPersistsDocument(t *testing.T) {
-	client, coll, cleanup := setupTxIntegrationTest(t)
-	defer cleanup()
+// TestIntegration_Transaction_CommitPersistsDocument is the commit counterpart:
+// a document inserted via tx.Context() must survive a Commit.
+func TestIntegration_Transaction_CommitPersistsDocument(t *testing.T) {
+	client, coll, _ := setupTxIntegrationTest(t)
 
 	mgr, err := NewMongoManager(client)
 	if err != nil {
@@ -183,10 +152,9 @@ func TestMongoTransaction_CommitPersistsDocument(t *testing.T) {
 	}
 }
 
-// TestMongoManager_Execute_Commit verifies a successful fn commits its writes.
-func TestMongoManager_Execute_Commit(t *testing.T) {
-	client, coll, cleanup := setupTxIntegrationTest(t)
-	defer cleanup()
+// TestIntegration_Manager_Execute_Commit verifies a successful fn commits its writes.
+func TestIntegration_Manager_Execute_Commit(t *testing.T) {
+	client, coll, _ := setupTxIntegrationTest(t)
 
 	mgr, err := NewMongoManager(client)
 	if err != nil {
@@ -211,11 +179,10 @@ func TestMongoManager_Execute_Commit(t *testing.T) {
 	}
 }
 
-// TestMongoManager_Execute_Rollback verifies an fn returning an error rolls
-// back its writes.
-func TestMongoManager_Execute_Rollback(t *testing.T) {
-	client, coll, cleanup := setupTxIntegrationTest(t)
-	defer cleanup()
+// TestIntegration_Manager_Execute_Rollback verifies an fn returning an error
+// rolls back its writes.
+func TestIntegration_Manager_Execute_Rollback(t *testing.T) {
+	client, coll, _ := setupTxIntegrationTest(t)
 
 	mgr, err := NewMongoManager(client)
 	if err != nil {
@@ -246,11 +213,10 @@ func TestMongoManager_Execute_Rollback(t *testing.T) {
 	}
 }
 
-// TestWithTransaction_Commit verifies the WithTransaction helper commits on
-// success.
-func TestWithTransaction_Commit(t *testing.T) {
-	client, coll, cleanup := setupTxIntegrationTest(t)
-	defer cleanup()
+// TestIntegration_WithTransaction_Commit verifies the WithTransaction helper
+// commits on success.
+func TestIntegration_WithTransaction_Commit(t *testing.T) {
+	client, coll, _ := setupTxIntegrationTest(t)
 
 	const id = "withtx-commit"
 	err := WithTransaction(context.Background(), client, func(ctx context.Context) error {
@@ -269,11 +235,10 @@ func TestWithTransaction_Commit(t *testing.T) {
 	}
 }
 
-// TestWithTransaction_Rollback verifies the WithTransaction helper rolls back
-// when fn returns an error.
-func TestWithTransaction_Rollback(t *testing.T) {
-	client, coll, cleanup := setupTxIntegrationTest(t)
-	defer cleanup()
+// TestIntegration_WithTransaction_Rollback verifies the WithTransaction helper
+// rolls back when fn returns an error.
+func TestIntegration_WithTransaction_Rollback(t *testing.T) {
+	client, coll, _ := setupTxIntegrationTest(t)
 
 	const id = "withtx-rollback"
 	sentinel := errors.New("boom")
