@@ -201,6 +201,20 @@ func findIndexScan(v any) string {
 				return name
 			}
 		}
+	case bson.D:
+		// Decoding an explain result into bson.M yields bson.D for nested
+		// documents (interface values default to bson.D), so the walk must
+		// handle bson.D too or it stops before reaching the nested COUNT_SCAN.
+		for _, e := range m {
+			if e.Key == "indexName" {
+				if name, _ := e.Value.(string); name != "" {
+					return name
+				}
+			}
+			if name := findIndexScan(e.Value); name != "" {
+				return name
+			}
+		}
 	case bson.A:
 		for _, child := range m {
 			if name := findIndexScan(child); name != "" {

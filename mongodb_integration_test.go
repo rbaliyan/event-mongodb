@@ -1750,17 +1750,18 @@ phase1:
 		t.Fatal("WithStartFromPast did not replay the historical document")
 	}
 
-	// Wait (bounded) for a resume token to be persisted so phase 2 has a saved
-	// position to resume from.
+	// Close phase 1 first, then confirm the token persisted. The in-run saver
+	// is throttled and may not fire for a single replayed change, but the
+	// transport flushes the latest resume token on shutdown (detached context),
+	// so closing is the deterministic point at which the token is durable.
 	resumeKey := t1.ResumeTokenKey()
-	if !eventuallyIntegration(resumeTokenSaveInterval+15*time.Second, func() bool {
+	bus1.Close(ctx)
+	if !eventuallyIntegration(10*time.Second, func() bool {
 		tok, loadErr := tokenStore.Load(ctx, resumeKey)
 		return loadErr == nil && len(tok) > 0
 	}) {
-		bus1.Close(ctx)
-		t.Fatal("timed out waiting for resume token to persist after phase 1")
+		t.Fatal("resume token was not persisted after phase 1 shutdown")
 	}
-	bus1.Close(ctx)
 
 	// Phase 2: equivalent transport WITH the saved token. WithStartFromPast must
 	// be ignored on this start (token takes precedence), so the historical
