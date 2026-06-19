@@ -3,7 +3,6 @@ package mongodb
 import (
 	"context"
 	"errors"
-	"log/slog"
 	"sync/atomic"
 	"time"
 
@@ -29,22 +28,20 @@ type resumeTokenDoc struct {
 //
 // Example:
 //
-//	store := mongodb.NewMongoResumeTokenStore(db.Collection("_resume_tokens"))
+//	store, _ := mongodb.NewMongoResumeTokenStore(db.Collection("_resume_tokens"))
 //	t, _ := mongodb.New(db,
 //	    mongodb.WithCollection("orders"),
 //	    mongodb.WithResumeTokenStore(store),
 //	)
+//
+// Index creation is not performed here: the constructor does no I/O. When this
+// store is used with a Transport, the transport calls EnsureIndexes during
+// Start. When used standalone, call EnsureIndexes once during startup.
 func NewMongoResumeTokenStore(collection *mongo.Collection) (*MongoResumeTokenStore, error) {
 	if collection == nil {
 		return nil, ErrCollectionNil
 	}
-	s := &MongoResumeTokenStore{collection: collection}
-	go func() { // #nosec G118 — background goroutine intentionally outlives constructor context
-		if err := s.EnsureIndexes(context.Background()); err != nil {
-			slog.Default().Error("failed to ensure resume token indexes", "error", err)
-		}
-	}()
-	return s, nil
+	return &MongoResumeTokenStore{collection: collection}, nil
 }
 
 // Load retrieves the resume token for a collection.
@@ -124,25 +121,23 @@ type ackDoc struct {
 //
 // Example:
 //
-//	store := mongodb.NewMongoAckStore(db.Collection("_event_acks"), 24*time.Hour)
+//	store, _ := mongodb.NewMongoAckStore(db.Collection("_event_acks"), 24*time.Hour)
 //	t, _ := mongodb.New(db,
 //	    mongodb.WithCollection("orders"),
 //	    mongodb.WithAckStore(store),
 //	)
+//
+// Index creation is not performed here: the constructor does no I/O. When this
+// store is used with a Transport, the transport calls EnsureIndexes during
+// Start. When used standalone, call EnsureIndexes once during startup.
 func NewMongoAckStore(collection *mongo.Collection, ttl time.Duration) (*MongoAckStore, error) {
 	if collection == nil {
 		return nil, ErrCollectionNil
 	}
-	s := &MongoAckStore{
+	return &MongoAckStore{
 		collection: collection,
 		ttl:        ttl,
-	}
-	go func() { // #nosec G118 — background goroutine intentionally outlives constructor context
-		if err := s.EnsureIndexes(context.Background()); err != nil {
-			slog.Default().Error("failed to ensure ack store indexes", "error", err)
-		}
-	}()
-	return s, nil
+	}, nil
 }
 
 // Store marks an event as pending (not yet acknowledged).

@@ -85,7 +85,7 @@
 //
 // The visibility timeout prevents message loss when consumers crash:
 //
-//	store := mongopersistent.NewStore(collection,
+//	store, err := mongopersistent.NewStore(collection,
 //	    mongopersistent.WithVisibilityTimeout(10*time.Minute),
 //	)
 //
