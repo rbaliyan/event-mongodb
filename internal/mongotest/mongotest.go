@@ -78,8 +78,11 @@ func Connect(t *testing.T) *mongo.Client {
 
 // UniqueDBName builds a collision-resistant database name from the given prefix,
 // the process PID, and a nanosecond timestamp. Including both PID and
-// nanoseconds avoids collisions between tests that start within the same second
+// nanoseconds avoids collisions between tests that start within the same instant
 // and between concurrent test binaries.
+//
+// The nanosecond count is rendered as a plain integer: MongoDB database names
+// may not contain '.', so a fractional-seconds timestamp layout cannot be used.
 func UniqueDBName(prefix string) string {
-	return fmt.Sprintf("%s_%d_%s", prefix, os.Getpid(), time.Now().Format("20060102150405.000000"))
+	return fmt.Sprintf("%s_%d_%d", prefix, os.Getpid(), time.Now().UnixNano())
 }
