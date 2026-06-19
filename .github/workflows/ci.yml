@@ -115,7 +115,31 @@ jobs:
         run: go install golang.org/x/perf/cmd/benchstat@latest
 
       - name: Run benchmarks (HEAD)
-        run: go test -run='^$' -bench=. -benchmem -count=6 ./... | tee new.txt
+        run: go test -run='^$' -bench=. -benchmem -count=10 ./... | tee new.txt
+
+      - name: Capture CPU and memory profiles (hot paths)
+        run: |
+          mkdir -p profiles
+          # Profile the root package, which holds the per-event hot paths.
+          go test -run='^$' -bench=. -benchmem -count=6 \
+            -cpuprofile=profiles/cpu.out -memprofile=profiles/mem.out . > /dev/null
+          {
+            echo '## CPU profile (top)'
+            echo '```'
+            go tool pprof -top -nodecount=15 profiles/cpu.out 2>/dev/null || true
+            echo '```'
+            echo '## Allocations (top)'
+            echo '```'
+            go tool pprof -top -sample_index=alloc_space -nodecount=15 profiles/mem.out 2>/dev/null || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload profiles
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: benchmark-profiles
+          path: profiles/
 
       - name: Run benchmarks (base) and compare
         if: github.event_name == 'pull_request'

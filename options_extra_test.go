@@ -4,6 +4,9 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
 // --- Options that the existing table did not cover ---
@@ -54,17 +57,26 @@ func TestWithMetrics(t *testing.T) {
 	}
 }
 
-func TestWithResumeTokenCollection_NilDBPanics(t *testing.T) {
+func TestWithResumeTokenCollection(t *testing.T) {
 	t.Parallel()
-	// WithResumeTokenCollection calls db.Collection; with a nil *mongo.Database
-	// it panics. We can still verify the option sets initErr when the store
-	// constructor would fail. Since we cannot build a real *mongo.Database
-	// without a connection, assert it does not silently no-op by checking it
-	// recovers from a nil db dereference. We guard with recover.
-	defer func() { _ = recover() }()
+	// mongo.Connect is lazy (no network I/O until an operation runs), and the
+	// resume-token store constructor no longer does I/O, so this exercises the
+	// option's observable effect without a live MongoDB.
+	client, err := mongo.Connect(options.Client().ApplyURI("mongodb://localhost:27017"))
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	t.Cleanup(func() { _ = client.Disconnect(context.Background()) })
+
 	o := &transportOptions{}
-	// A nil database dereference is expected; the recover keeps the test green.
-	WithResumeTokenCollection(nil, "_tokens")(o)
+	WithResumeTokenCollection(client.Database("testdb"), "_tokens")(o)
+
+	if o.initErr != nil {
+		t.Fatalf("unexpected initErr: %v", o.initErr)
+	}
+	if o.resumeTokenStore == nil {
+		t.Fatal("expected resumeTokenStore to be set by WithResumeTokenCollection")
+	}
 }
 
 func TestDefaultOptions(t *testing.T) {

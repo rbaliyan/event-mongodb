@@ -41,35 +41,20 @@ func TestCoalesceByDocumentKey_Applies(t *testing.T) {
 		t.Fatalf("Register: %v", err)
 	}
 
+	const n = 5
 	var (
 		mu             sync.Mutex
 		delivered      int
 		coalescedTotal int
 		releaseFirst   = make(chan struct{})
+		entered        = make(chan struct{}) // closed when the first delivery starts
+		done           = make(chan struct{}) // closed when delivered+coalesced reaches n
 		firstSeen      atomic.Bool
+		doneOnce       sync.Once
 	)
 
-	err = ev.Subscribe(ctx, func(hctx context.Context, _ event.Event[coDoc], _ coDoc) error {
-		if firstSeen.CompareAndSwap(false, true) {
-			// Block the first delivery so subsequent same-key messages queue
-			// and coalesce behind it.
-			<-releaseFirst
-		}
-		mu.Lock()
-		delivered++
-		coalescedTotal += event.ContextCoalescedCount(hctx)
-		mu.Unlock()
-		return nil
-	}, CoalesceByDocumentKey[coDoc]())
-	if err != nil {
-		t.Fatalf("Subscribe: %v", err)
-	}
-
-	// Publish several messages with the SAME document_key directly via the
-	// channel transport so we control metadata precisely. The transport
-	// registers events under the bare event name (the bus strips its prefix).
-	const n = 5
-	for i := 0; i < n; i++ {
+	publish := func(i int) {
+		t.Helper()
 		msg := transport.NewMessage(
 			"id-"+string(rune('a'+i)),
 			"test",
@@ -81,24 +66,52 @@ func TestCoalesceByDocumentKey_Applies(t *testing.T) {
 			trace.SpanContext{},
 		)
 		if err := ch.Publish(ctx, "doc.changes", msg); err != nil {
-			t.Fatalf("Publish %d: %v", i, err)
+			t.Errorf("Publish %d: %v", i, err)
 		}
 	}
 
-	// Give the first message time to be picked up and block in the handler.
-	time.Sleep(200 * time.Millisecond)
+	err = ev.Subscribe(ctx, func(hctx context.Context, _ event.Event[coDoc], _ coDoc) error {
+		if firstSeen.CompareAndSwap(false, true) {
+			// Signal that the first delivery is in-flight, then block so the
+			// subsequent same-key messages queue and coalesce behind it. This
+			// handshake replaces a timing sleep, making the coalescing window
+			// deterministic.
+			close(entered)
+			<-releaseFirst
+		}
+		mu.Lock()
+		delivered++
+		coalescedTotal += event.ContextCoalescedCount(hctx)
+		total := delivered + coalescedTotal
+		mu.Unlock()
+		if total >= n {
+			doneOnce.Do(func() { close(done) })
+		}
+		return nil
+	}, CoalesceByDocumentKey[coDoc]())
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+
+	// Publish the first message and wait until the handler is actually blocked
+	// inside it before publishing the rest, so the remaining same-key messages
+	// are guaranteed to queue and coalesce behind it.
+	publish(0)
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for first delivery to start")
+	}
+	for i := 1; i < n; i++ {
+		publish(i)
+	}
 	close(releaseFirst)
 
-	// Wait for the queue to drain.
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		mu.Lock()
-		d, c := delivered, coalescedTotal
-		mu.Unlock()
-		if d+c >= n {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
+	// Wait for the queue to drain (event-driven, no polling sleep).
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		// fall through to assert on whatever was accounted so far
 	}
 
 	mu.Lock()
