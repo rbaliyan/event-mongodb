@@ -40,16 +40,6 @@ func TestNewMongoStoreNilDB(t *testing.T) {
 	}
 }
 
-func TestNewMongoPublisherNilClient(t *testing.T) {
-	pub, err := NewMongoPublisher(nil, nil)
-	if err == nil {
-		t.Fatal("expected error for nil client, got nil")
-	}
-	if pub != nil {
-		t.Fatalf("expected nil publisher, got %v", pub)
-	}
-}
-
 func TestIsNamespaceNotFoundError(t *testing.T) {
 	tests := []struct {
 		name string
@@ -73,7 +63,7 @@ func TestIsNamespaceNotFoundError(t *testing.T) {
 	}
 }
 
-func TestMongoMessageToMessage(t *testing.T) {
+func TestMongoMessageToClaimedMessage(t *testing.T) {
 	objID := bson.NewObjectID()
 	created := time.Date(2026, 6, 19, 10, 0, 0, 0, time.UTC)
 	published := time.Date(2026, 6, 19, 11, 0, 0, 0, time.UTC)
@@ -92,10 +82,10 @@ func TestMongoMessageToMessage(t *testing.T) {
 		Priority:    7,
 	}
 
-	got := mm.toMessage()
+	got := mm.toClaimedMessage()
 
-	if got.ID != objID.Timestamp().Unix() {
-		t.Errorf("ID = %d, want %d", got.ID, objID.Timestamp().Unix())
+	if token, ok := evtoutbox.Token(got).(bson.ObjectID); !ok || token != objID {
+		t.Errorf("token = %v, want %v", evtoutbox.Token(got), objID)
 	}
 	if got.EventName != "order.created" {
 		t.Errorf("EventName = %q, want %q", got.EventName, "order.created")
@@ -129,15 +119,22 @@ func TestMongoMessageToMessage(t *testing.T) {
 	}
 }
 
-func TestMongoMessageToMessageNilPublishedAt(t *testing.T) {
+func TestMongoMessageToClaimedMessageNilPublishedAt(t *testing.T) {
 	mm := &mongoMessage{
 		ID:        bson.NewObjectID(),
 		EventName: "x",
 		Status:    evtoutbox.StatusPending,
 	}
-	got := mm.toMessage()
+	got := mm.toClaimedMessage()
 	if got.PublishedAt != nil {
 		t.Errorf("PublishedAt = %v, want nil", got.PublishedAt)
+	}
+}
+
+func TestMongoStoreNotificationsNil(t *testing.T) {
+	store := &MongoStore{}
+	if ch := store.Notifications(); ch != nil {
+		t.Fatalf("Notifications() = %v, want nil (poll-only deferral)", ch)
 	}
 }
 

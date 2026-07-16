@@ -2,7 +2,6 @@ package outbox
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -12,14 +11,22 @@ import (
 	"github.com/google/uuid"
 	event "github.com/rbaliyan/event/v3"
 	evtoutbox "github.com/rbaliyan/event/v3/outbox"
-	"github.com/rbaliyan/event/v3/transport/codec"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
-// Compile-time check that MongoStore implements event.OutboxStore
-var _ event.OutboxStore = (*MongoStore)(nil)
+// Compile-time checks that MongoStore implements the backend-neutral outbox
+// contract from github.com/rbaliyan/event/v3/outbox, plus event.OutboxStore
+// for bus-level integration (Store has the identical signature).
+var (
+	_ event.OutboxStore        = (*MongoStore)(nil)
+	_ evtoutbox.Store          = (*MongoStore)(nil)
+	_ evtoutbox.StuckRecoverer = (*MongoStore)(nil)
+	_ evtoutbox.Starter        = (*MongoStore)(nil)
+	_ evtoutbox.Waker          = (*MongoStore)(nil)
+	_ evtoutbox.Batch          = (*mongoBatch)(nil)
+)
 
 // isNamespaceNotFoundError checks if the error is a MongoDB namespace not found error.
 // This occurs when querying collection stats for a non-existent collection.
@@ -78,10 +85,12 @@ type mongoMessage struct {
 	Priority    int               `bson:"priority"`
 }
 
-// toMessage converts mongoMessage to evtoutbox.Message
-func (m *mongoMessage) toMessage() *evtoutbox.Message {
-	return &evtoutbox.Message{
-		ID:          m.ID.Timestamp().Unix(), // Use timestamp as int64 ID for compatibility
+// toClaimedMessage converts a mongoMessage to the backend-neutral
+// evtoutbox.Message, stashing the ObjectID as the claim token via
+// evtoutbox.NewClaimedMessage (Message has no public id field; the token is
+// how mongoBatch.Ack/Fail resolve back to this document).
+func (m *mongoMessage) toClaimedMessage() evtoutbox.Message {
+	msg := evtoutbox.Message{
 		EventName:   m.EventName,
 		EventID:     m.EventID,
 		Payload:     m.Payload,
@@ -93,6 +102,7 @@ func (m *mongoMessage) toMessage() *evtoutbox.Message {
 		LastError:   m.LastError,
 		Priority:    m.Priority,
 	}
+	return evtoutbox.NewClaimedMessage(msg, m.ID)
 }
 
 // cappedInfo contains information about a capped collection
@@ -142,8 +152,9 @@ func NewMongoStore(db *mongo.Database, opts ...MongoStoreOption) (*MongoStore, e
 	}
 
 	// Index creation is not performed here: the constructor does no I/O. The
-	// MongoRelay and ChangeStreamRelay call EnsureIndexes during Start. When
-	// using the store without a relay, call EnsureIndexes once during startup.
+	// generic evtoutbox.Relay calls EnsureReady (which wraps EnsureIndexes)
+	// once at the start of its Start() loop. When using the store without a
+	// relay, call EnsureIndexes (or EnsureReady) once during startup.
 	return &MongoStore{
 		collection: db.Collection(o.collection),
 	}, nil
@@ -195,6 +206,24 @@ func (s *MongoStore) Indexes() []mongo.IndexModel {
 func (s *MongoStore) EnsureIndexes(ctx context.Context) error {
 	_, err := s.collection.Indexes().CreateMany(ctx, s.Indexes())
 	return err
+}
+
+// EnsureReady implements evtoutbox.Starter: the generic relay calls this once
+// at startup, before the first ClaimPending, so the required indexes exist.
+// Wraps EnsureIndexes.
+func (s *MongoStore) EnsureReady(ctx context.Context) error {
+	return s.EnsureIndexes(ctx)
+}
+
+// Notifications implements evtoutbox.Waker. It currently always returns nil
+// (poll-only): a real-time wakeup backed by a MongoDB change stream was
+// deferred because it could not be exercised against a live deployment in
+// this change (see the outbox package doc for the migration note). A nil
+// channel is safe for the relay engine — the corresponding select case blocks
+// forever, leaving the poll ticker as the sole wakeup source, identical to
+// the store's prior polling behavior.
+func (s *MongoStore) Notifications() <-chan struct{} {
+	return nil
 }
 
 // IsCapped returns whether the collection is a capped collection.
@@ -373,22 +402,20 @@ func (s *MongoStore) Store(ctx context.Context, eventName string, eventID string
 	return err
 }
 
-// GetPending retrieves pending messages for publishing with atomic batch claiming.
-func (s *MongoStore) GetPending(ctx context.Context, limit int) ([]*evtoutbox.Message, error) {
+// ClaimPending implements evtoutbox.Store. It atomically claims up to limit
+// pending/failed messages and returns them as a mongoBatch, which resolves
+// each message's Ack/Fail back to its document via the ObjectID token stashed
+// by toClaimedMessage (see evtoutbox.NewClaimedMessage / evtoutbox.Token).
+func (s *MongoStore) ClaimPending(ctx context.Context, limit int) (evtoutbox.Batch, error) {
 	msgs, err := s.claimBatch(ctx, limit)
 	if err != nil {
 		return nil, err
 	}
-	result := make([]*evtoutbox.Message, len(msgs))
+	claimed := make([]evtoutbox.Message, len(msgs))
 	for i, m := range msgs {
-		result[i] = m.toMessage()
+		claimed[i] = m.toClaimedMessage()
 	}
-	return result, nil
-}
-
-// getPendingMongo retrieves pending messages as mongoMessage with atomic batch claiming.
-func (s *MongoStore) getPendingMongo(ctx context.Context, limit int) ([]*mongoMessage, error) {
-	return s.claimBatch(ctx, limit)
+	return &mongoBatch{store: s, msgs: claimed}, nil
 }
 
 // claimBatch atomically claims up to limit pending/failed messages in 3 round-trips
@@ -478,28 +505,6 @@ func (s *MongoStore) claimBatch(ctx context.Context, limit int) ([]*mongoMessage
 	return messages, fetchCursor.Err()
 }
 
-// MarkPublished marks a message as successfully published
-func (s *MongoStore) MarkPublished(ctx context.Context, id bson.ObjectID) error {
-	now := time.Now()
-	update := bson.M{
-		"$set": bson.M{
-			"status":       evtoutbox.StatusPublished,
-			"published_at": now,
-		},
-	}
-
-	result, err := s.collection.UpdateByID(ctx, id, update)
-	if err != nil {
-		return fmt.Errorf("update: %w", err)
-	}
-
-	if result.MatchedCount == 0 {
-		return fmt.Errorf("message not found: %s", id.Hex())
-	}
-
-	return nil
-}
-
 // MarkPublishedByEventID marks a message as published using the event ID
 func (s *MongoStore) MarkPublishedByEventID(ctx context.Context, eventID string) error {
 	now := time.Now()
@@ -518,30 +523,6 @@ func (s *MongoStore) MarkPublishedByEventID(ctx context.Context, eventID string)
 
 	if result.MatchedCount == 0 {
 		return fmt.Errorf("message not found: %s", eventID)
-	}
-
-	return nil
-}
-
-// MarkFailed marks a message as failed with an error
-func (s *MongoStore) MarkFailed(ctx context.Context, id bson.ObjectID, err error) error {
-	update := bson.M{
-		"$set": bson.M{
-			"status":     evtoutbox.StatusFailed,
-			"last_error": err.Error(),
-		},
-		"$inc": bson.M{
-			"retry_count": 1,
-		},
-	}
-
-	result, updateErr := s.collection.UpdateByID(ctx, id, update)
-	if updateErr != nil {
-		return fmt.Errorf("update: %w", updateErr)
-	}
-
-	if result.MatchedCount == 0 {
-		return fmt.Errorf("message not found: %s", id.Hex())
 	}
 
 	return nil
@@ -572,10 +553,10 @@ func (s *MongoStore) MarkFailedByEventID(ctx context.Context, eventID string, er
 	return nil
 }
 
-// Delete removes old published messages.
+// Cleanup implements evtoutbox.Store. It removes old published messages.
 // For capped collections, this is a no-op since MongoDB handles cleanup automatically.
 // Returns 0 for capped collections without error.
-func (s *MongoStore) Delete(ctx context.Context, olderThan time.Duration) (int64, error) {
+func (s *MongoStore) Cleanup(ctx context.Context, olderThan time.Duration) (int64, error) {
 	// Check if capped - deletion not allowed on capped collections
 	capped, err := s.IsCapped(ctx)
 	if err != nil {
@@ -653,132 +634,72 @@ func (s *MongoStore) RecoverStuck(ctx context.Context, stuckDuration time.Durati
 	return result.ModifiedCount, nil
 }
 
-// MongoPublisher provides methods for publishing messages through the MongoDB outbox
-type MongoPublisher struct {
-	store  *MongoStore
-	client *mongo.Client
-	codec  codec.Codec
+// mongoBatch implements evtoutbox.Batch over a set of claimed messages.
+// Ack marks a message published; Fail marks it failed and increments its
+// retry count. Both resolve the target document via the ObjectID stashed in
+// the message's token (evtoutbox.Token) rather than a public Message.ID,
+// since evtoutbox.Message carries no exported identifier. Close is a no-op:
+// unlike Postgres (which holds a claim tx open until Close), MongoDB's claim
+// (claimBatch's UpdateMany) already committed by the time ClaimPending
+// returns, so there is no resource to release here.
+type mongoBatch struct {
+	store *MongoStore
+	msgs  []evtoutbox.Message
 }
 
-// NewMongoPublisher creates a new MongoDB outbox publisher.
-func NewMongoPublisher(client *mongo.Client, db *mongo.Database, opts ...MongoStoreOption) (*MongoPublisher, error) {
-	if client == nil {
-		return nil, errors.New("mongodb: client is required")
-	}
+func (b *mongoBatch) Messages() []evtoutbox.Message { return b.msgs }
 
-	store, err := NewMongoStore(db, opts...)
+func (b *mongoBatch) Ack(ctx context.Context, msg evtoutbox.Message) error {
+	id, ok := evtoutbox.Token(msg).(bson.ObjectID)
+	if !ok {
+		return fmt.Errorf("mongodb outbox: expected bson.ObjectID token, got %T", evtoutbox.Token(msg))
+	}
+	now := time.Now()
+	update := bson.M{
+		"$set": bson.M{
+			"status":       evtoutbox.StatusPublished,
+			"published_at": now,
+		},
+	}
+	result, err := b.store.collection.UpdateByID(ctx, id, update)
 	if err != nil {
-		return nil, err
+		return fmt.Errorf("update: %w", err)
 	}
-
-	return &MongoPublisher{
-		store:  store,
-		client: client,
-		codec:  codec.Default(),
-	}, nil
+	if result.MatchedCount == 0 {
+		return fmt.Errorf("message not found: %s", id.Hex())
+	}
+	return nil
 }
 
-// WithCodec sets a custom codec for encoding payloads
-func (p *MongoPublisher) WithCodec(c codec.Codec) *MongoPublisher {
-	p.codec = c
-	return p
-}
-
-// Store returns the underlying MongoStore
-func (p *MongoPublisher) Store() *MongoStore {
-	return p.store
-}
-
-// PublishInSession stores a message in the outbox within a MongoDB session/transaction.
-// In MongoDB driver v2, pass the session context directly as ctx.
-func (p *MongoPublisher) PublishInSession(
-	ctx context.Context,
-	eventName string,
-	payload any,
-	metadata map[string]string,
-) error {
-	encoded, err := json.Marshal(payload)
+func (b *mongoBatch) Fail(ctx context.Context, msg evtoutbox.Message, cause error) error {
+	id, ok := evtoutbox.Token(msg).(bson.ObjectID)
+	if !ok {
+		return fmt.Errorf("mongodb outbox: expected bson.ObjectID token, got %T", evtoutbox.Token(msg))
+	}
+	var lastError string
+	if cause != nil {
+		lastError = cause.Error()
+	}
+	update := bson.M{
+		"$set": bson.M{
+			"status":     evtoutbox.StatusFailed,
+			"last_error": lastError,
+		},
+		"$inc": bson.M{
+			"retry_count": 1,
+		},
+	}
+	result, err := b.store.collection.UpdateByID(ctx, id, update)
 	if err != nil {
-		return fmt.Errorf("encode payload: %w", err)
+		return fmt.Errorf("update: %w", err)
 	}
-
-	msg := &mongoMessage{
-		EventName: eventName,
-		EventID:   uuid.New().String(),
-		Payload:   encoded,
-		Metadata:  metadata,
+	if result.MatchedCount == 0 {
+		return fmt.Errorf("message not found: %s", id.Hex())
 	}
-
-	return p.store.InsertInSession(ctx, msg)
+	return nil
 }
 
-// PublishWithTransaction stores a message in the outbox and executes fn within a transaction.
-// In MongoDB driver v2, the callback receives context.Context with the session embedded.
-func (p *MongoPublisher) PublishWithTransaction(
-	ctx context.Context,
-	eventName string,
-	payload any,
-	metadata map[string]string,
-	fn func(ctx context.Context) error,
-) error {
-	encoded, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("encode payload: %w", err)
-	}
-
-	msg := &mongoMessage{
-		EventName: eventName,
-		EventID:   uuid.New().String(),
-		Payload:   encoded,
-		Metadata:  metadata,
-	}
-
-	sess, err := p.client.StartSession()
-	if err != nil {
-		return fmt.Errorf("start session: %w", err)
-	}
-	defer sess.EndSession(ctx)
-
-	_, err = sess.WithTransaction(ctx, func(ctx context.Context) (any, error) {
-		// Execute user's business logic
-		if fn != nil {
-			if err := fn(ctx); err != nil {
-				return nil, err
-			}
-		}
-
-		// Insert outbox message
-		if err := p.store.InsertInSession(ctx, msg); err != nil {
-			return nil, fmt.Errorf("insert outbox: %w", err)
-		}
-
-		return nil, nil
-	})
-
-	return err
-}
-
-// Publish stores a message in the outbox (without transaction)
-func (p *MongoPublisher) Publish(
-	ctx context.Context,
-	eventName string,
-	payload any,
-	metadata map[string]string,
-) error {
-	encoded, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("encode payload: %w", err)
-	}
-
-	msg := &mongoMessage{
-		EventName: eventName,
-		EventID:   uuid.New().String(),
-		Payload:   encoded,
-		Metadata:  metadata,
-	}
-
-	return p.store.Insert(ctx, msg)
-}
+func (b *mongoBatch) Close(context.Context) error { return nil }
 
 // Transaction executes the given function within a MongoDB transaction.
 // The context passed to fn contains the transaction session via event.WithOutboxTx,
