@@ -84,18 +84,20 @@ func (rt *recordingTransport) ids() []string {
 
 var _ transport.Transport = (*recordingTransport)(nil)
 
-// setupOutboxPublisher returns a MongoPublisher backed by a unique per-test
-// database. It reuses mongotest.Connect (skips without Mongo) and drops the DB
-// via t.Cleanup. Returns the publisher and the underlying client.
-func setupOutboxPublisher(t *testing.T) (*MongoPublisher, *mongo.Client) {
+// setupOutboxPublisher returns a generic evtoutbox.Publisher backed by a
+// MongoStore in a unique per-test database. It reuses mongotest.Connect
+// (skips without Mongo) and drops the DB via t.Cleanup. Returns the publisher,
+// the underlying MongoStore (for assertions), and the client (for
+// Transaction/TransactionWithOptions).
+func setupOutboxPublisher(t *testing.T) (*evtoutbox.Publisher, *MongoStore, *mongo.Client) {
 	t.Helper()
 
 	client := mongotest.Connect(t)
 	db := client.Database(mongotest.UniqueDBName("test_outbox_pub"))
 
-	pub, err := NewMongoPublisher(client, db)
+	store, err := NewMongoStore(db)
 	if err != nil {
-		t.Fatalf("NewMongoPublisher: %v", err)
+		t.Fatalf("NewMongoStore: %v", err)
 	}
 
 	t.Cleanup(func() {
@@ -104,7 +106,7 @@ func setupOutboxPublisher(t *testing.T) (*MongoPublisher, *mongo.Client) {
 		_ = db.Drop(dropCtx)
 	})
 
-	return pub, client
+	return evtoutbox.NewPublisher(store), store, client
 }
 
 // waitFor polls cond until it returns true or the deadline elapses. It avoids
@@ -121,10 +123,10 @@ func waitFor(t *testing.T, timeout time.Duration, cond func() bool) bool {
 	return cond()
 }
 
-// --- MongoPublisher tests ---
+// --- Generic Publisher tests ---
 
-func TestIntegrationPublisherPublish(t *testing.T) {
-	pub, _ := setupOutboxPublisher(t)
+func TestIntegrationGenericPublisherPublish(t *testing.T) {
+	pub, store, _ := setupOutboxPublisher(t)
 	ctx := context.Background()
 
 	if err := pub.Publish(ctx, "order.created", map[string]any{"id": 1}, map[string]string{"k": "v"}); err != nil {
@@ -132,12 +134,14 @@ func TestIntegrationPublisherPublish(t *testing.T) {
 	}
 
 	// The stored message should be claimable as pending.
-	msgs, err := pub.Store().GetPending(ctx, 10)
+	batch, err := store.ClaimPending(ctx, 10)
 	if err != nil {
-		t.Fatalf("GetPending: %v", err)
+		t.Fatalf("ClaimPending: %v", err)
 	}
+	defer func() { _ = batch.Close(ctx) }()
+	msgs := batch.Messages()
 	if len(msgs) != 1 {
-		t.Fatalf("GetPending returned %d, want 1", len(msgs))
+		t.Fatalf("ClaimPending returned %d, want 1", len(msgs))
 	}
 	if msgs[0].EventName != "order.created" {
 		t.Errorf("EventName = %q, want order.created", msgs[0].EventName)
@@ -147,55 +151,21 @@ func TestIntegrationPublisherPublish(t *testing.T) {
 	}
 }
 
-func TestIntegrationPublisherPublishInSession(t *testing.T) {
-	pub, client := setupOutboxPublisher(t)
+func TestIntegrationGenericPublisherInTransactionCommit(t *testing.T) {
+	pub, store, client := setupOutboxPublisher(t)
 	ctx := context.Background()
 
-	sess, err := client.StartSession()
-	if err != nil {
-		t.Fatalf("StartSession: %v", err)
-	}
-	defer sess.EndSession(ctx)
-
-	_, err = sess.WithTransaction(ctx, func(sc context.Context) (any, error) {
-		return nil, pub.PublishInSession(sc, "order.created", map[string]any{"id": 2}, nil)
+	err := Transaction(ctx, client, func(txCtx context.Context) error {
+		return pub.Publish(txCtx, "order.created", map[string]any{"id": 2}, nil)
 	})
 	if err != nil {
 		if isUnsupportedRelayTxError(err) {
 			t.Skipf("transactions unsupported by deployment: %v", err)
 		}
-		t.Fatalf("WithTransaction: %v", err)
+		t.Fatalf("Transaction: %v", err)
 	}
 
-	count, err := pub.Store().Count(ctx, evtoutbox.StatusPending)
-	if err != nil {
-		t.Fatalf("Count: %v", err)
-	}
-	if count != 1 {
-		t.Fatalf("pending count = %d, want 1", count)
-	}
-}
-
-func TestIntegrationPublisherPublishWithTransactionCommit(t *testing.T) {
-	pub, _ := setupOutboxPublisher(t)
-	ctx := context.Background()
-
-	called := false
-	err := pub.PublishWithTransaction(ctx, "order.created", map[string]any{"id": 3}, nil, func(_ context.Context) error {
-		called = true
-		return nil
-	})
-	if err != nil {
-		if isUnsupportedRelayTxError(err) {
-			t.Skipf("transactions unsupported by deployment: %v", err)
-		}
-		t.Fatalf("PublishWithTransaction: %v", err)
-	}
-	if !called {
-		t.Error("business logic fn was not called")
-	}
-
-	count, err := pub.Store().Count(ctx, evtoutbox.StatusPending)
+	count, err := store.Count(ctx, evtoutbox.StatusPending)
 	if err != nil {
 		t.Fatalf("Count: %v", err)
 	}
@@ -204,23 +174,26 @@ func TestIntegrationPublisherPublishWithTransactionCommit(t *testing.T) {
 	}
 }
 
-func TestIntegrationPublisherPublishWithTransactionRollback(t *testing.T) {
-	pub, _ := setupOutboxPublisher(t)
+func TestIntegrationGenericPublisherInTransactionRollback(t *testing.T) {
+	pub, store, client := setupOutboxPublisher(t)
 	ctx := context.Background()
 
 	boom := errors.New("business logic boom")
-	err := pub.PublishWithTransaction(ctx, "order.created", map[string]any{"id": 4}, nil, func(_ context.Context) error {
+	err := Transaction(ctx, client, func(txCtx context.Context) error {
+		if pubErr := pub.Publish(txCtx, "order.created", map[string]any{"id": 3}, nil); pubErr != nil {
+			return pubErr
+		}
 		return boom
 	})
 	if isUnsupportedRelayTxError(err) {
 		t.Skipf("transactions unsupported by deployment: %v", err)
 	}
 	if !errors.Is(err, boom) {
-		t.Fatalf("PublishWithTransaction error = %v, want %v", err, boom)
+		t.Fatalf("Transaction error = %v, want %v", err, boom)
 	}
 
 	// The fn error must roll the transaction back: nothing stored.
-	count, err := pub.Store().Count(ctx, evtoutbox.StatusPending)
+	count, err := store.Count(ctx, evtoutbox.StatusPending)
 	if err != nil {
 		t.Fatalf("Count: %v", err)
 	}
@@ -230,9 +203,8 @@ func TestIntegrationPublisherPublishWithTransactionRollback(t *testing.T) {
 }
 
 func TestIntegrationTransactionCommit(t *testing.T) {
-	pub, client := setupOutboxPublisher(t)
+	_, store, client := setupOutboxPublisher(t)
 	ctx := context.Background()
-	store := pub.Store()
 
 	err := Transaction(ctx, client, func(txCtx context.Context) error {
 		// Store() routes through the embedded session context.
@@ -255,9 +227,8 @@ func TestIntegrationTransactionCommit(t *testing.T) {
 }
 
 func TestIntegrationTransactionRollback(t *testing.T) {
-	pub, client := setupOutboxPublisher(t)
+	_, store, client := setupOutboxPublisher(t)
 	ctx := context.Background()
-	store := pub.Store()
 
 	boom := errors.New("tx boom")
 	err := Transaction(ctx, client, func(txCtx context.Context) error {
@@ -282,16 +253,17 @@ func TestIntegrationTransactionRollback(t *testing.T) {
 	}
 }
 
-// --- MongoRelay (poll mode) tests ---
+// --- Generic Relay (evtoutbox.NewRelay) tests ---
 
 func TestIntegrationRelayPollPublishesPending(t *testing.T) {
 	store, _ := setupOutboxStore(t)
 	ctx := context.Background()
 
 	rt := &recordingTransport{}
-	relay := NewMongoRelay(store, rt).
-		WithPollDelay(10 * time.Millisecond).
-		WithBatchSize(50)
+	relay := evtoutbox.NewRelay(store, rt,
+		evtoutbox.WithPollDelay(10*time.Millisecond),
+		evtoutbox.WithBatchSize(50),
+	)
 
 	// Pre-insert pending messages.
 	insertPending(t, ctx, store, "relay-1", 0)
@@ -353,7 +325,7 @@ func TestIntegrationRelayPollMarksFailedOnTransportError(t *testing.T) {
 	ctx := context.Background()
 
 	rt := &recordingTransport{failErr: errors.New("transport down")}
-	relay := NewMongoRelay(store, rt).WithPollDelay(10 * time.Millisecond)
+	relay := evtoutbox.NewRelay(store, rt, evtoutbox.WithPollDelay(10*time.Millisecond))
 
 	insertPending(t, ctx, store, "fail-1", 0)
 
@@ -379,14 +351,17 @@ func TestIntegrationRelayPollMarksFailedOnTransportError(t *testing.T) {
 	}
 }
 
-func TestIntegrationRelayRecoverStuck(t *testing.T) {
+// TestIntegrationRelayRecoverStuckViaStart exercises stuck-message recovery
+// through the generic relay's Start loop (rather than calling an unexported
+// relay method, which is not reachable from this package now that Relay lives
+// in github.com/rbaliyan/event/v3/outbox). A short WithStuckInterval makes the
+// sweep run promptly; success is observed end-to-end via the store, since a
+// recovered ("pending") message is then claimed and published by the same
+// running relay.
+func TestIntegrationRelayRecoverStuckViaStart(t *testing.T) {
 	store, _ := setupOutboxStore(t)
 	ctx := context.Background()
 
-	rt := &recordingTransport{}
-	relay := NewMongoRelay(store, rt).WithStuckDuration(5 * time.Minute)
-
-	// A message stuck in processing with an old claimed_at.
 	stale := time.Now().Add(-30 * time.Minute)
 	_, err := store.Collection().InsertOne(ctx, mongoMessage{
 		ID:        bson.NewObjectID(),
@@ -401,51 +376,32 @@ func TestIntegrationRelayRecoverStuck(t *testing.T) {
 		t.Fatalf("InsertOne stuck: %v", err)
 	}
 
-	relay.recoverStuck(ctx)
-
-	if c, err := store.Count(ctx, evtoutbox.StatusPending); err != nil || c != 1 {
-		t.Fatalf("pending count = %d (err=%v), want 1 (recovered)", c, err)
-	}
-	if c, err := store.Count(ctx, evtoutbox.StatusProcessing); err != nil || c != 0 {
-		t.Fatalf("processing count = %d (err=%v), want 0", c, err)
-	}
-}
-
-func TestIntegrationRelayCleanup(t *testing.T) {
-	store, _ := setupOutboxStore(t)
-	ctx := context.Background()
-
 	rt := &recordingTransport{}
-	relay := NewMongoRelay(store, rt).WithCleanupAge(24 * time.Hour)
+	relay := evtoutbox.NewRelay(store, rt,
+		evtoutbox.WithPollDelay(20*time.Millisecond),
+		evtoutbox.WithStuckInterval(20*time.Millisecond, 5*time.Minute),
+	)
 
-	oldTime := time.Now().Add(-48 * time.Hour)
-	recentTime := time.Now()
-	_, err := store.Collection().InsertMany(ctx, []any{
-		mongoMessage{
-			ID:          bson.NewObjectID(),
-			EventName:   "e",
-			EventID:     "old",
-			Status:      evtoutbox.StatusPublished,
-			PublishedAt: &oldTime,
-			CreatedAt:   oldTime,
-		},
-		mongoMessage{
-			ID:          bson.NewObjectID(),
-			EventName:   "e",
-			EventID:     "recent",
-			Status:      evtoutbox.StatusPublished,
-			PublishedAt: &recentTime,
-			CreatedAt:   recentTime,
-		},
-	})
-	if err != nil {
-		t.Fatalf("InsertMany: %v", err)
+	runCtx, cancel := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() { done <- relay.Start(runCtx) }()
+	t.Cleanup(cancel)
+
+	if !waitFor(t, 5*time.Second, func() bool {
+		n, err := store.Count(ctx, evtoutbox.StatusPublished)
+		return err == nil && n >= 1
+	}) {
+		t.Fatal("stuck message was not recovered and republished via relay Start")
+	}
+	if rt.count() < 1 {
+		t.Fatalf("transport published %d messages, want >= 1", rt.count())
 	}
 
-	relay.cleanup(ctx)
-
-	if c, err := store.Count(ctx, evtoutbox.StatusPublished); err != nil || c != 1 {
-		t.Fatalf("remaining published = %d (err=%v), want 1 (old deleted)", c, err)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("relay Start did not return after cancel")
 	}
 }
 
@@ -454,7 +410,7 @@ func TestIntegrationRelayPublishOnce(t *testing.T) {
 	ctx := context.Background()
 
 	rt := &recordingTransport{}
-	relay := NewMongoRelay(store, rt)
+	relay := evtoutbox.NewRelay(store, rt)
 
 	insertPending(t, ctx, store, "once-1", 0)
 	insertPending(t, ctx, store, "once-2", 0)
@@ -468,144 +424,5 @@ func TestIntegrationRelayPublishOnce(t *testing.T) {
 	}
 	if c, err := store.Count(ctx, evtoutbox.StatusPublished); err != nil || c != 2 {
 		t.Fatalf("published count = %d (err=%v), want 2", c, err)
-	}
-}
-
-// --- ChangeStreamRelay tests ---
-
-// TestIntegrationChangeStreamProcessExistingPending exercises the
-// ChangeStreamRelay's deterministic startup path: pre-existing pending messages
-// are published and marked published. This is preferred over a live watch test
-// because change-stream delivery timing is not deterministic enough to assert
-// reliably; processExistingPending uses the same claim/publish path the watcher
-// relies on. The full watch loop additionally requires a replica set and is
-// covered indirectly via MongoRelay changestream wiring.
-func TestIntegrationChangeStreamProcessExistingPending(t *testing.T) {
-	store, _ := setupOutboxStore(t)
-	ctx := context.Background()
-
-	rt := &recordingTransport{}
-	csRelay := NewChangeStreamRelay(store, rt).WithBatchSize(50)
-
-	insertPending(t, ctx, store, "cs-1", 0)
-	insertPending(t, ctx, store, "cs-2", 0)
-
-	csRelay.processExistingPending(ctx)
-
-	if rt.count() != 2 {
-		t.Fatalf("transport published %d, want 2", rt.count())
-	}
-	if c, err := store.Count(ctx, evtoutbox.StatusPublished); err != nil || c != 2 {
-		t.Fatalf("published count = %d (err=%v), want 2", c, err)
-	}
-}
-
-// TestIntegrationChangeStreamWatchDelivers exercises the full Start path,
-// including the live Change Stream watch loop. It requires a replica set; if the
-// deployment does not support change streams, the watch goroutine logs an error
-// and reconnects, so we detect non-delivery via the bounded wait and skip.
-func TestIntegrationChangeStreamWatchDelivers(t *testing.T) {
-	store, _ := setupOutboxStore(t)
-	ctx := context.Background()
-
-	// Verify change streams are supported before asserting delivery; otherwise
-	// skip rather than fail on a standalone deployment.
-	probeCtx, probeCancel := context.WithTimeout(ctx, 5*time.Second)
-	stream, err := store.Collection().Watch(probeCtx, mongo.Pipeline{})
-	if err != nil {
-		probeCancel()
-		if isUnsupportedRelayTxError(err) {
-			t.Skipf("change streams unsupported by deployment: %v", err)
-		}
-		t.Skipf("could not open change stream probe: %v", err)
-	}
-	_ = stream.Close(probeCtx)
-	probeCancel()
-
-	rt := &recordingTransport{}
-	csRelay := NewChangeStreamRelay(store, rt).WithBatchSize(50)
-
-	runCtx, cancel := context.WithCancel(ctx)
-	done := make(chan error, 1)
-	go func() { done <- csRelay.Start(runCtx) }()
-	t.Cleanup(cancel) // inline wait below drains done; don't double-read it here
-
-	// Give the watch loop a brief, bounded moment to establish before inserting.
-	time.Sleep(500 * time.Millisecond)
-	insertPending(t, ctx, store, "cs-watch-1", 0)
-
-	if !waitFor(t, 8*time.Second, func() bool { return rt.count() >= 1 }) {
-		t.Skipf("change stream did not deliver within timeout (deployment may not support change streams reliably)")
-	}
-
-	if !waitFor(t, 5*time.Second, func() bool {
-		n, err := store.Count(ctx, evtoutbox.StatusPublished)
-		return err == nil && n >= 1
-	}) {
-		n, _ := store.Count(ctx, evtoutbox.StatusPublished)
-		t.Fatalf("published count = %d, want >= 1", n)
-	}
-
-	cancel()
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("ChangeStreamRelay Start did not return after cancel")
-	}
-}
-
-func TestIntegrationResumeTokenStore(t *testing.T) {
-	client := mongotest.Connect(t)
-	db := client.Database(mongotest.UniqueDBName("test_outbox_token"))
-	t.Cleanup(func() {
-		dropCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		_ = db.Drop(dropCtx)
-	})
-
-	ctx := context.Background()
-	ts, err := NewMongoResumeTokenStore(db, "relay-1")
-	if err != nil {
-		t.Fatalf("NewMongoResumeTokenStore: %v", err)
-	}
-
-	// No token saved yet -> Load returns nil, no error.
-	tok, err := ts.Load(ctx)
-	if err != nil {
-		t.Fatalf("Load (empty): %v", err)
-	}
-	if tok != nil {
-		t.Fatalf("Load (empty) = %v, want nil", tok)
-	}
-
-	// Save then Load round-trips the token.
-	raw, mErr := bson.Marshal(bson.M{"_data": "token-abc"})
-	if mErr != nil {
-		t.Fatalf("Marshal token: %v", mErr)
-	}
-	want := bson.Raw(raw)
-	if err := ts.Save(ctx, want); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-
-	got, err := ts.Load(ctx)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if got == nil {
-		t.Fatal("Load returned nil after Save")
-	}
-
-	// Upsert: saving a second time for the same relayID updates, not duplicates.
-	raw2, _ := bson.Marshal(bson.M{"_data": "token-xyz"})
-	if err := ts.Save(ctx, bson.Raw(raw2)); err != nil {
-		t.Fatalf("Save (update): %v", err)
-	}
-	n, err := db.Collection("outbox_resume_tokens").CountDocuments(ctx, bson.M{"_id": "relay-1"})
-	if err != nil {
-		t.Fatalf("CountDocuments: %v", err)
-	}
-	if n != 1 {
-		t.Fatalf("resume token docs = %d, want 1 (upsert)", n)
 	}
 }

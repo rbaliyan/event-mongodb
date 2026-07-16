@@ -71,12 +71,14 @@ func TestIntegrationInsertAndGetPending(t *testing.T) {
 		t.Fatalf("pending count = %d, want 2", pending)
 	}
 
-	msgs, err := store.GetPending(ctx, 10)
+	batch, err := store.ClaimPending(ctx, 10)
 	if err != nil {
-		t.Fatalf("GetPending: %v", err)
+		t.Fatalf("ClaimPending: %v", err)
 	}
+	defer func() { _ = batch.Close(ctx) }()
+	msgs := batch.Messages()
 	if len(msgs) != 2 {
-		t.Fatalf("GetPending returned %d, want 2", len(msgs))
+		t.Fatalf("ClaimPending returned %d, want 2", len(msgs))
 	}
 
 	// Higher priority should come first.
@@ -170,16 +172,18 @@ func TestIntegrationMarkPublished(t *testing.T) {
 	ctx := context.Background()
 
 	insertPending(t, ctx, store, "evt-1", 0)
-	claimed, err := store.getPendingMongo(ctx, 10)
+	batch, err := store.ClaimPending(ctx, 10)
 	if err != nil {
-		t.Fatalf("getPendingMongo: %v", err)
+		t.Fatalf("ClaimPending: %v", err)
 	}
+	defer func() { _ = batch.Close(ctx) }()
+	claimed := batch.Messages()
 	if len(claimed) != 1 {
 		t.Fatalf("claimed %d, want 1", len(claimed))
 	}
 
-	if err := store.MarkPublished(ctx, claimed[0].ID); err != nil {
-		t.Fatalf("MarkPublished: %v", err)
+	if err := batch.Ack(ctx, claimed[0]); err != nil {
+		t.Fatalf("Ack: %v", err)
 	}
 
 	published, err := store.Count(ctx, evtoutbox.StatusPublished)
@@ -196,13 +200,18 @@ func TestIntegrationMarkFailed(t *testing.T) {
 	ctx := context.Background()
 
 	insertPending(t, ctx, store, "evt-1", 0)
-	claimed, err := store.getPendingMongo(ctx, 10)
+	batch, err := store.ClaimPending(ctx, 10)
 	if err != nil {
-		t.Fatalf("getPendingMongo: %v", err)
+		t.Fatalf("ClaimPending: %v", err)
+	}
+	defer func() { _ = batch.Close(ctx) }()
+	claimed := batch.Messages()
+	if len(claimed) != 1 {
+		t.Fatalf("claimed %d, want 1", len(claimed))
 	}
 
-	if err := store.MarkFailed(ctx, claimed[0].ID, errors.New("publish boom")); err != nil {
-		t.Fatalf("MarkFailed: %v", err)
+	if err := batch.Fail(ctx, claimed[0], errors.New("publish boom")); err != nil {
+		t.Fatalf("Fail: %v", err)
 	}
 
 	failed, err := store.Count(ctx, evtoutbox.StatusFailed)
@@ -214,8 +223,12 @@ func TestIntegrationMarkFailed(t *testing.T) {
 	}
 
 	// retry_count should have been incremented and last_error recorded.
+	id, ok := evtoutbox.Token(claimed[0]).(bson.ObjectID)
+	if !ok {
+		t.Fatalf("token type = %T, want bson.ObjectID", evtoutbox.Token(claimed[0]))
+	}
 	var doc mongoMessage
-	if err := store.Collection().FindOne(ctx, bson.M{"_id": claimed[0].ID}).Decode(&doc); err != nil {
+	if err := store.Collection().FindOne(ctx, bson.M{"_id": id}).Decode(&doc); err != nil {
 		t.Fatalf("FindOne: %v", err)
 	}
 	if doc.RetryCount != 1 {
@@ -364,9 +377,9 @@ func TestIntegrationDeleteOldPublished(t *testing.T) {
 		t.Fatalf("InsertMany: %v", err)
 	}
 
-	deleted, err := store.Delete(ctx, 24*time.Hour)
+	deleted, err := store.Cleanup(ctx, 24*time.Hour)
 	if err != nil {
-		t.Fatalf("Delete: %v", err)
+		t.Fatalf("Cleanup: %v", err)
 	}
 	if deleted != 1 {
 		t.Fatalf("deleted = %d, want 1", deleted)

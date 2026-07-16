@@ -664,7 +664,7 @@ func runOutboxTest(ctx context.Context, client *mongo.Client, db *mongo.Database
 	store, err := outbox.NewMongoStore(db, outbox.WithCollection("test_outbox"))
 	check(label+": NewMongoStore", err)
 	defer func() { _ = store.Collection().Drop(context.Background()) }()
-	check(label+": EnsureIndexes", store.EnsureIndexes(ctx))
+	check(label+": EnsureReady", store.EnsureReady(ctx))
 
 	// Store a message in the outbox.
 	payload, _ := json.Marshal(map[string]string{"product": "widget", "qty": "3"})
@@ -679,9 +679,11 @@ func runOutboxTest(ctx context.Context, client *mongo.Client, db *mongo.Database
 		log.Fatalf("[FAIL] %s: expected 1 pending message, got %d", label, n)
 	}
 
-	// GetPending retrieves claimed messages (transitions them to processing state).
-	pending, err := store.GetPending(ctx, 10)
-	check(label+": GetPending", err)
+	// ClaimPending atomically claims messages (transitions them to processing
+	// state) and returns them wrapped in an evtoutbox.Batch.
+	batch, err := store.ClaimPending(ctx, 10)
+	check(label+": ClaimPending", err)
+	pending := batch.Messages()
 	if len(pending) != 1 {
 		log.Fatalf("[FAIL] %s: expected 1 pending message, got %d", label, len(pending))
 	}
@@ -689,9 +691,10 @@ func runOutboxTest(ctx context.Context, client *mongo.Client, db *mongo.Database
 		log.Fatalf("[FAIL] %s: expected order.created, got %s", label, pending[0].EventName)
 	}
 
-	// MarkPublished transitions the message to published state.
+	// Batch.Ack transitions the message to published state.
 	// In normal operation the relay does this automatically.
-	check(label+": MarkPublishedByEventID", store.MarkPublishedByEventID(ctx, "evt-001"))
+	check(label+": batch.Ack", batch.Ack(ctx, pending[0]))
+	check(label+": batch.Close", batch.Close(ctx))
 
 	// Pending count should now be zero.
 	n2, err := store.Count(ctx, evtoutbox.StatusPending)
@@ -700,38 +703,39 @@ func runOutboxTest(ctx context.Context, client *mongo.Client, db *mongo.Database
 		log.Fatalf("[FAIL] %s: expected 0 pending after publish, got %d", label, n2)
 	}
 
-	// ─── MongoPublisher: transactional outbox write ───────────────────────────
-	publisher, err := outbox.NewMongoPublisher(client, db, outbox.WithCollection("test_outbox"))
-	check(label+": NewMongoPublisher", err)
+	// ─── evtoutbox.Publisher + outbox.Transaction: transactional outbox write ──
+	publisher := evtoutbox.NewPublisher(store)
 
-	// PublishWithTransaction atomically inserts the business doc + outbox message.
 	ordersCol := db.Collection("test_orders")
 	defer func() { _ = ordersCol.Drop(context.Background()) }()
 
-	// PublishWithTransaction takes (ctx, eventName, payload any, metadata, fn).
-	// payload is marshalled to JSON internally; eventID is auto-generated.
-	err = publisher.PublishWithTransaction(ctx, "order.shipped",
-		map[string]string{"orderId": "ord-99", "status": "shipped"},
-		map[string]string{"trace": "xyz"},
-		func(txCtx context.Context) error {
-			_, err := ordersCol.InsertOne(txCtx, bson.M{"_id": "ord-99", "status": "shipped"})
+	// outbox.Transaction wraps a MongoDB session and marks it on the context
+	// via event.WithOutboxTx, so publisher.Publish (which calls store.Store)
+	// inserts the outbox message in the same transaction as the business write.
+	err = outbox.Transaction(ctx, client, func(txCtx context.Context) error {
+		if _, err := ordersCol.InsertOne(txCtx, bson.M{"_id": "ord-99", "status": "shipped"}); err != nil {
 			return err
-		},
-	)
-	check(label+": PublishWithTransaction", err)
+		}
+		return publisher.Publish(txCtx, "order.shipped",
+			map[string]string{"orderId": "ord-99", "status": "shipped"},
+			map[string]string{"trace": "xyz"},
+		)
+	})
+	check(label+": Transaction+Publish", err)
 
 	n3, err := store.Count(ctx, evtoutbox.StatusPending)
-	check(label+": Count after PublishWithTransaction", err)
+	check(label+": Count after Transaction+Publish", err)
 	if n3 != 1 {
-		log.Fatalf("[FAIL] %s: expected 1 pending after PublishWithTransaction, got %d", label, n3)
+		log.Fatalf("[FAIL] %s: expected 1 pending after Transaction+Publish, got %d", label, n3)
 	}
 
-	// ─── MongoRelay: polling relay publishes to in-memory transport ──────────
+	// ─── evtoutbox.Relay: generic polling relay publishes to in-memory transport ──
 	chanT := channeltransport.New()
-	relay := outbox.NewMongoRelay(store, chanT).
-		WithPollDelay(0).
-		WithBatchSize(10).
-		WithCleanupAge(1 * time.Hour)
+	relay := evtoutbox.NewRelay(store, chanT,
+		evtoutbox.WithPollDelay(0),
+		evtoutbox.WithBatchSize(10),
+		evtoutbox.WithCleanupAge(1*time.Hour),
+	)
 
 	// PublishOnce picks up the pending message and publishes it to the transport.
 	check(label+": relay.PublishOnce", relay.PublishOnce(ctx))
@@ -742,22 +746,14 @@ func runOutboxTest(ctx context.Context, client *mongo.Client, db *mongo.Database
 		log.Fatalf("[FAIL] %s: expected 0 pending after relay, got %d", label, n4)
 	}
 
-	// ─── ChangeStreamRelay: real-time relay (requires replica set) ───────────
-	// NewChangeStreamRelay creates a relay that watches the outbox collection via
-	// a MongoDB Change Stream instead of polling. Call csRelay.Start(ctx) to run.
-	outbox.NewChangeStreamRelay(store, chanT).
-		WithBatchSize(10).
-		WithCleanupAge(24 * time.Hour).
-		WithStuckDuration(5 * time.Minute)
-
-	// ─── MongoPublisher with BSON codec ────────────────────────────────────
-	// WithCodec selects the encoding used to store and relay payloads.
-	// mongocodec.BSON is preferred when payloads are MongoDB documents.
-	bsonPublisher, err := outbox.NewMongoPublisher(client, db, outbox.WithCollection("test_outbox"))
-	check(label+": NewMongoPublisher for BSON", err)
-	if bsonPublisher.WithCodec(mongocodec.BSON{}) == nil {
-		log.Fatalf("[FAIL] %s: WithCodec returned nil", label)
-	}
+	// ─── evtoutbox.Publisher with a BSON payload encoder ──────────────────────
+	// WithEncoder overrides the default json.Marshal payload encoder; useful
+	// when payloads are MongoDB documents best stored as BSON. Unlike the
+	// removed MongoPublisher.WithCodec (which never actually affected
+	// encoding), this option is honored by every Publish call.
+	bsonPublisher := evtoutbox.NewPublisher(store, evtoutbox.WithEncoder(bson.Marshal))
+	check(label+": bsonPublisher.Publish", bsonPublisher.Publish(ctx, "order.created",
+		bson.M{"product": "gadget", "qty": 1}, nil))
 
 	pass(label)
 }
