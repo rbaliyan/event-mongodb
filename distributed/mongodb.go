@@ -122,10 +122,14 @@ func (s *MongoStateManager) Acquire(ctx context.Context, messageID string, ttl t
 	expiresAt := now.Add(ttl)
 	workerID := s.generateWorkerID()
 
+	// A released state is acquirable regardless of expires_at: BSON dates are
+	// millisecond-truncated, so a Reset in the same millisecond as this call
+	// would otherwise leave expires_at neither before nor after now.
 	filter := bson.M{
 		"_id": messageID,
 		"$or": []bson.M{
 			{"expires_at": bson.M{"$lt": now}},
+			{"status": statusReleased},
 			{"status": bson.M{"$exists": false}},
 		},
 	}

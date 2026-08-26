@@ -324,4 +324,22 @@ func TestIntegrationCappedCollectionLifecycle(t *testing.T) {
 	if !ok {
 		t.Fatal("expected acquire to succeed after capped Reset")
 	}
+
+	// Reset/Acquire cycles must succeed no matter how tightly they are
+	// interleaved. Because BSON dates are millisecond-truncated, a Reset
+	// landing in the same millisecond as the following Acquire leaves
+	// expires_at equal to (not before) now, so a filter relying only on
+	// expires_at would intermittently refuse to reacquire.
+	for i := range 50 {
+		if err := mgr.Reset(ctx, "capped-1"); err != nil {
+			t.Fatalf("Reset (capped, iteration %d): %v", i, err)
+		}
+		ok, err = mgr.Acquire(ctx, "capped-1", time.Minute)
+		if err != nil {
+			t.Fatalf("Acquire after Reset (capped, iteration %d): %v", i, err)
+		}
+		if !ok {
+			t.Fatalf("iteration %d: expected acquire to succeed after capped Reset", i)
+		}
+	}
 }
