@@ -1,6 +1,6 @@
 module github.com/rbaliyan/event-mongodb
 
-go 1.26.5
+go 1.26.7
 
 require (
 	github.com/AdamKorcz/go-118-fuzz-build v0.0.0-20250520111509-a70c2aa677fa
@@ -33,6 +33,6 @@ require (
 	go.uber.org/atomic v1.11.0 // indirect
 	golang.org/x/crypto v0.53.0 // indirect
 	golang.org/x/sys v0.46.0 // indirect
-	golang.org/x/text v0.38.0 // indirect
+	golang.org/x/text v0.40.0 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 )
