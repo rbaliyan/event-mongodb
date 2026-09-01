@@ -24,15 +24,6 @@ compile_native_go_fuzzer github.com/rbaliyan/event-mongodb/payload FuzzPayloadBS
 # convention ($OUT/<name>.dict + $OUT/<name>.options). Targets whose corpus is
 # raw BSON/JSON bytes benefit from the BSON type bytes and field-name tokens;
 # scalar-argument targets (e.g. FuzzFieldCoerce) are deliberately omitted.
-#
-# The same targets also get a raised per-input timeout. The default (25s) fires
-# on these decoders under AddressSanitizer even though the decode itself is
-# cheap: BSON.Decode is linear (300k metadata keys -> 55ms) and payloads are
-# bson.Raw, so nesting is O(1) and a crafted length prefix is rejected before
-# allocating. The cost lives in the instrumented go-118-fuzz-build harness, not
-# in the code under test, so a 25s budget flags harness overhead as a bug.
-# 90s keeps a genuine hang fatal while leaving ~2.4x headroom over the worst
-# observed run (37s) and staying well inside the per-target fuzzing budget.
 cp "$SRC"/event-mongodb/.clusterfuzzlite/fuzz.dict "$OUT"/fuzz.dict
 
 byte_oriented_fuzzers=(
@@ -52,6 +43,5 @@ for fuzzer in "${byte_oriented_fuzzers[@]}"; do
   cat > "$OUT"/"$fuzzer".options <<EOF
 [libfuzzer]
 dict = $fuzzer.dict
-timeout = 90
 EOF
 done
