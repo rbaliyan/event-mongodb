@@ -18,6 +18,7 @@ jobs:
         id: build
         uses: google/clusterfuzzlite/actions/build_fuzzers@52ecc61cb587ee99c26825a112a21abf19c7448c # v1
         with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
           language: go
           sanitizer: address
 
@@ -25,6 +26,7 @@ jobs:
         id: run
         uses: google/clusterfuzzlite/actions/run_fuzzers@52ecc61cb587ee99c26825a112a21abf19c7448c # v1
         with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
           language: go
           # Only fuzz code changed in the PR, with a short budget.
           mode: code-change
